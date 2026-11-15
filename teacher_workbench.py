@@ -3,7 +3,7 @@ import io
 import json
 from pathlib import Path
 
-from flask import abort, jsonify, request, send_file
+from flask import abort, g, jsonify, request, send_file
 from PIL import Image
 
 
@@ -196,16 +196,21 @@ def register(app, db, row, submission_detail, uploads, submission_summaries):
     def workbench_assignments():
         with db() as conn:
             conn.execute('BEGIN')
-            assignments = [dict(r) for r in conn.execute('''SELECT a.id,a.class_id,a.class_name,
+            tenant_mode = app.config.get('TEACHER_TENANT_MODE', False)
+            query = '''SELECT a.id,a.class_id,a.class_name,
                 c.archived AS class_archived,a.archived,a.task_id,t.name AS task_name,a.term,a.created_at
                 FROM assignments a JOIN classes c ON c.id=a.class_id JOIN tasks t ON t.id=a.task_id
-                ORDER BY a.created_at DESC,a.id DESC''')]
+                ''' + ('WHERE a.owner_id=? ' if tenant_mode else '') + 'ORDER BY a.created_at DESC,a.id DESC'
+            assignments = [dict(r) for r in conn.execute(query, (g.teacher_id,) if tenant_mode else ())]
             aids = [a['id'] for a in assignments]
             roster_counts = {r['assignment_id']: r['expected'] for r in conn.execute('''SELECT assignment_id,
                 SUM(CASE WHEN exempt=0 THEN 1 ELSE 0 END) AS expected FROM assignment_students GROUP BY assignment_id''')}
             ids = {aid: [] for aid in aids}
-            for r in conn.execute('''SELECT s.id,a.assignment_id FROM submissions s
-                    JOIN assignment_students a ON a.id=s.assignment_student_id WHERE a.exempt=0'''):
+            query = '''SELECT s.id,a.assignment_id FROM submissions s
+                    JOIN assignment_students a ON a.id=s.assignment_student_id
+                    JOIN assignments assigned ON assigned.id=a.assignment_id WHERE a.exempt=0'''
+            query += ' AND assigned.owner_id=?' if tenant_mode else ''
+            for r in conn.execute(query, (g.teacher_id,) if tenant_mode else ()):
                 ids[r['assignment_id']].append(r['id'])
             unavailable = set()
             try:

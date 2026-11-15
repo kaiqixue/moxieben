@@ -1,8 +1,10 @@
 """Local durable batch progress; existing routes own OCR, matching and scoring."""
 import json
 import threading
+from contextlib import nullcontext
 
-from flask import abort, jsonify, request
+from flask import abort, g, jsonify, request
+from teacher_auth import internal_post
 
 
 def active_submission_job(conn, sid, states=('queued', 'running')):
@@ -96,6 +98,7 @@ def register(app, db, row, stamp):
 class GradingJobs:
     def __init__(self, app, db, row, stamp):
         self.app, self.db, self.row, self.stamp = app, db, row, stamp
+        self.tenant_mode = app.config.get('TEACHER_TENANT_MODE', False)
         self.lock = threading.Lock()
         self.thread_lock = threading.Lock()
         self.wake = threading.Event()
@@ -118,6 +121,28 @@ class GradingJobs:
                 conn.execute('DROP TABLE grading_jobs_legacy')
             else:
                 conn.execute(definition)
+            if self.tenant_mode:
+                if 'owner_id' not in {c['name'] for c in conn.execute('PRAGMA table_info(grading_jobs)')}:
+                    if conn.execute('SELECT 1 FROM grading_jobs LIMIT 1').fetchone():
+                        raise ValueError('后台任务已有记录，需要先核对教师归属。')
+                    conn.execute('ALTER TABLE grading_jobs ADD COLUMN owner_id INTEGER REFERENCES users(id)')
+                conn.executescript('''
+                    CREATE INDEX IF NOT EXISTS grading_jobs_owner ON grading_jobs(owner_id,id);
+                    CREATE TRIGGER IF NOT EXISTS grading_jobs_owned_insert BEFORE INSERT ON grading_jobs
+                    WHEN NEW.owner_id IS NULL OR
+                        (NEW.assignment_id IS NOT NULL AND NEW.owner_id !=
+                         (SELECT owner_id FROM assignments WHERE id=NEW.assignment_id)) OR
+                        (NEW.submission_id IS NOT NULL AND NEW.owner_id !=
+                         (SELECT owner_id FROM submissions WHERE id=NEW.submission_id))
+                    BEGIN SELECT RAISE(ABORT, 'job owner mismatch'); END;
+                    CREATE TRIGGER IF NOT EXISTS grading_jobs_owned_update BEFORE UPDATE ON grading_jobs
+                    WHEN NEW.owner_id IS NULL OR NEW.owner_id != OLD.owner_id OR
+                        (NEW.assignment_id IS NOT NULL AND NEW.owner_id !=
+                         (SELECT owner_id FROM assignments WHERE id=NEW.assignment_id)) OR
+                        (NEW.submission_id IS NOT NULL AND NEW.owner_id !=
+                         (SELECT owner_id FROM submissions WHERE id=NEW.submission_id))
+                    BEGIN SELECT RAISE(ABORT, 'job owner mismatch'); END;
+                ''')
             conn.execute("UPDATE grading_jobs SET state='interrupted',message='服务已重启，请点击继续；已完成记录会保留。',updated_at=? WHERE state IN ('queued','running')", (stamp(),))
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_grading_job ON grading_jobs(assignment_id) WHERE state IN ('queued','running')")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_submission_job ON grading_jobs(submission_id) WHERE state IN ('queued','running')")
@@ -142,16 +167,22 @@ class GradingJobs:
                 ids = photo_ids if photo_ids is not None else [p[0] for p in conn.execute('SELECT id FROM batch_photos WHERE assignment_id=? AND excluded=0 ORDER BY id', (assignment_id,))]
                 if not ids:
                     abort(400, description='请先上传未排除的作业照片。')
+                if self.tenant_mode and any(self.row(conn, 'batch_photos', pid)['assignment_id'] != assignment_id for pid in ids):
+                    abort(404, description='照片不属于本次作业。')
                 if job and not set(ids) <= set(json.loads(job['photo_ids'])):
                     abort(409, description='本班已有后台任务，请等待完成后再处理这些照片。')
                 stage, grades = 'identifying', []
             if not job:
                 created = self.stamp()
-                jid = conn.execute('''INSERT INTO grading_jobs
-                    (assignment_id,submission_id,options,state,stage,message,photo_ids,grade_ids,total,created_at,updated_at)
-                    VALUES(?,?,?,'queued',?,'已交给后台，可离开页面。',?,?,?,?,?)''',
-                    (assignment_id,submission_id,json.dumps(options or {}),stage,json.dumps(ids),json.dumps(grades),len(grades or ids),created,created)).lastrowid
+                values = (assignment_id,submission_id,json.dumps(options or {}),stage,json.dumps(ids),json.dumps(grades),len(grades or ids),created,created)
+                columns = 'assignment_id,submission_id,options,stage,photo_ids,grade_ids,total,created_at,updated_at'
+                if self.tenant_mode:
+                    columns += ',owner_id'
+                    values += (g.teacher_id,)
+                jid = conn.execute(f"INSERT INTO grading_jobs({columns},state,message) VALUES({','.join('?' for _ in values)},'queued','已交给后台，可离开页面。')", values).lastrowid
                 job = self.row(conn, 'grading_jobs', jid)
+            elif self.tenant_mode:
+                job = self.row(conn, 'grading_jobs', job['id'])
             return self.dto(job)
 
     @staticmethod
@@ -189,8 +220,8 @@ class GradingJobs:
         job.update(changes)
 
     def post(self, path, payload):
-        with self.app.test_client() as client:
-            return client.post(path, json=payload, headers={'X-CSRF-Token': self.app.config['CSRF_TOKEN']})
+        return internal_post(self.app, path, payload,
+                             owner_id=g.teacher_id if self.tenant_mode else None)
 
     def error(self, job, message, **reference):
         errors = json.loads(job['errors'])
@@ -203,8 +234,9 @@ class GradingJobs:
             return False
         job = None
         try:
-            with self.db() as conn:
-                found = conn.execute('''SELECT j.* FROM grading_jobs j WHERE j.state IN ('queued','running')
+            with (self.app.app_context() if self.tenant_mode else nullcontext()):
+                with self.db() as conn:
+                    found = conn.execute('''SELECT j.* FROM grading_jobs j WHERE j.state IN ('queued','running')
                     AND NOT EXISTS(SELECT 1 FROM assignments a JOIN classes c ON c.id=a.class_id
                         WHERE c.archived=1 AND (a.id=j.assignment_id
                         OR EXISTS(SELECT 1 FROM assignment_students ast JOIN submissions sub ON sub.assignment_student_id=ast.id
@@ -212,16 +244,32 @@ class GradingJobs:
                                 OR EXISTS(SELECT 1 FROM json_each(j.grade_ids) WHERE value=sub.id)))
                         OR EXISTS(SELECT 1 FROM json_each(j.photo_ids) ids JOIN batch_photos p ON p.id=ids.value
                             WHERE p.assignment_id=a.id))) ORDER BY j.id LIMIT 1''').fetchone()
-                if not found:
-                    return False
-                job = dict(found)
-            self.save(job, state='running')
-            if job['stage'] == 'identifying':
-                self.identify(job)
-            elif job['stage'] == 'matching':
-                self.match(job)
-            else:
-                self.grade(job)
+                    if not found:
+                        return False
+                    job = dict(found)
+                    if self.tenant_mode:
+                        g.teacher_id = job['owner_id']
+                        if not conn.execute('SELECT 1 FROM users WHERE id=? AND role=? AND disabled_at IS NULL',
+                                            (g.teacher_id, 'teacher')).fetchone():
+                            raise ValueError('job owner unavailable')
+                        self.row(conn, 'grading_jobs', job['id'])
+                        if job['assignment_id']:
+                            self.row(conn, 'assignments', job['assignment_id'])
+                        if job['submission_id']:
+                            self.row(conn, 'submissions', job['submission_id'])
+                        for pid in json.loads(job['photo_ids']):
+                            photo = self.row(conn, 'batch_photos', pid)
+                            if photo['assignment_id'] != job['assignment_id']:
+                                raise ValueError('job photo assignment mismatch')
+                        for sid in json.loads(job['grade_ids']):
+                            self.row(conn, 'submissions', sid)
+                self.save(job, state='running')
+                if job['stage'] == 'identifying':
+                    self.identify(job)
+                elif job['stage'] == 'matching':
+                    self.match(job)
+                else:
+                    self.grade(job)
             return True
         except Exception:
             # Provider exceptions may contain credentials: never expose the original exception.

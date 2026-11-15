@@ -12,7 +12,7 @@ import sqlite3
 import threading
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -35,6 +35,7 @@ import teacher_workbench
 import task_deletion
 import class_analysis
 import student_id_band
+import teacher_auth
 
 ROOT = Path(__file__).resolve().parent
 IMAGE_LIMIT = 10 * 1024 * 1024
@@ -94,10 +95,38 @@ def create_app(config=None):
                       MAX_CONTENT_LENGTH=IMAGE_LIMIT + 256 * 1024)
     if config:
         app.config.update(config)
+    if config is None:
+        if tenant_dir := os.environ.get('MOXIEBEN_TENANT_DIR'):
+            app.config.update(DATA_DIR=tenant_dir, TEACHER_TENANT_MODE=True)
+        elif preview_dir := os.environ.get('MOXIEBEN_ACCOUNT_PREVIEW_DIR'):
+            app.config.update(DATA_DIR=preview_dir, TEACHER_ACCOUNT_PREVIEW=True)
+    account_preview = app.config.get('TEACHER_ACCOUNT_PREVIEW', False)
+    tenant_mode = app.config.get('TEACHER_TENANT_MODE', False)
     data_dir = Path(app.config['DATA_DIR'])
-    uploads = data_dir / 'uploads'
-    uploads.mkdir(parents=True, exist_ok=True)
-    database = data_dir / 'dictation.sqlite3'
+    if (account_preview or tenant_mode) and data_dir.resolve().is_relative_to((ROOT / 'data').resolve()):
+        raise ValueError('多账号模式需要独立数据目录，不能使用现有 data 目录。')
+    data_dir.mkdir(parents=True, exist_ok=True)
+    database = data_dir / ('accounts.sqlite3' if account_preview else 'dictation.sqlite3')
+    if tenant_mode and database.exists():
+        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as existing:
+            tables = {record[0] for record in existing.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            if 'students' in tables:
+                student_columns = {column[1] for column in existing.execute('PRAGMA table_info(students)')}
+                if 'owner_id' not in student_columns:
+                    raise ValueError('旧版学生档案结构使用全局学号约束，需要先核对教师归属并迁移。')
+                for index in existing.execute('PRAGMA index_list(students)'):
+                    if index[2] and [column[2] for column in existing.execute(
+                            f'PRAGMA index_info({index[1]})')] == ['school_code']:
+                        raise ValueError('学生档案仍有全局学号约束，需要先完成迁移。')
+            for table in ('tasks', 'classes', 'students', 'submissions', 'assignments',
+                          'class_memberships', 'assignment_students', 'batch_photos', 'grading_jobs'):
+                if table in tables:
+                    columns = {column[1] for column in existing.execute(f'PRAGMA table_info({table})')}
+                    if (('owner_id' not in columns and existing.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone())
+                            or ('owner_id' in columns and existing.execute(
+                                f'SELECT 1 FROM {table} WHERE owner_id IS NULL LIMIT 1').fetchone())):
+                        raise ValueError('此数据库已有教学数据，需要先核对教师归属。')
 
     @contextmanager
     def db():
@@ -113,6 +142,45 @@ def create_app(config=None):
         finally:
             conn.close()
 
+    @app.before_request
+    def local_only():
+        if request.host.split(':')[0] not in ('localhost', '127.0.0.1'):
+            fail('此网站仅供本机访问。', 403)
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            origin = request.headers.get('Origin')
+            if origin and urlsplit(origin).netloc != request.host:
+                fail('请求来源不匹配，请从本机网站操作。', 403)
+
+    @app.after_request
+    def headers(response):
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Referrer-Policy'] = 'same-origin'
+        response.headers['X-Frame-Options'] = 'DENY'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    @app.errorhandler(HTTPException)
+    def http_error(exc):
+        messages = {404: '没有找到这条记录。', 413: '照片超过 10MB，请缩小后重新上传。',
+                    415: '请使用 JSON 请求。', 400: '请求格式不正确。'}
+        message = exc.description if exc.code not in (404, 413, 415) else messages[exc.code]
+        if request.path.startswith('/api/'):
+            return jsonify(error=message), exc.code
+        return render_template('print.html', mode='error', error=message), exc.code
+
+    @app.errorhandler(Exception)
+    def unexpected_error(exc):
+        app.logger.exception('Unexpected request error')
+        if request.path.startswith('/api/'):
+            return jsonify(error='操作失败，已有记录已保留。请重试；详情可查看终端日志。'), 500
+        return render_template('print.html', mode='error', error='操作失败，请重试并查看终端日志。'), 500
+
+    teacher_auth.register(app, db)
+    if account_preview:
+        return app
+
+    uploads = data_dir / 'uploads'
+    uploads.mkdir(parents=True, exist_ok=True)
     with db() as conn:
         conn.executescript('''
         CREATE TABLE IF NOT EXISTS tasks (
@@ -157,6 +225,12 @@ def create_app(config=None):
             PRIMARY KEY(submission_id, question_id, page_id));
         ''')
         conn.execute("UPDATE pages SET status='error', error='上次识别被中断，请点击重新识别。' WHERE status='running'")
+        if tenant_mode:
+            conn.execute('''CREATE TABLE IF NOT EXISTS students (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL, school_code TEXT,
+                active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                owner_id INTEGER NOT NULL REFERENCES users(id),
+                UNIQUE(owner_id,school_code))''')
 
     migrate(database)
     student_id_band.migrate(database)
@@ -165,17 +239,112 @@ def create_app(config=None):
     migrate_settings(database)
     automatic_grading.migrate(database)
 
-    @app.before_request
-    def local_only():
-        if request.host.split(':')[0] not in ('localhost', '127.0.0.1'):
-            fail('此网站仅供本机访问。', 403)
-        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
-            origin = request.headers.get('Origin')
-            if origin and urlsplit(origin).netloc != request.host:
-                fail('请求来源不匹配，请从本机网站操作。', 403)
-            supplied = request.headers.get('X-CSRF-Token', '')
-            if not secrets.compare_digest(supplied, app.config['CSRF_TOKEN']):
-                fail('页面验证已失效，请刷新页面后重试。', 403)
+    if tenant_mode:
+        with db() as conn:
+            for table in ('tasks', 'classes', 'students', 'submissions', 'assignments'):
+                columns = {column['name'] for column in conn.execute(f'PRAGMA table_info({table})')}
+                if 'owner_id' not in columns:
+                    if conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone():
+                        raise ValueError('此数据库已有教学数据，需要先核对教师归属。')
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN owner_id INTEGER REFERENCES users(id)')
+                conn.execute(f'CREATE INDEX IF NOT EXISTS {table}_owner ON {table}(owner_id,id)')
+                conn.execute(f'''CREATE TRIGGER IF NOT EXISTS {table}_owned_insert
+                    BEFORE INSERT ON {table} WHEN NEW.owner_id IS NULL
+                    BEGIN SELECT RAISE(ABORT, 'teacher owner required'); END''')
+                conn.execute(f'''CREATE TRIGGER IF NOT EXISTS {table}_owned_update
+                    BEFORE UPDATE ON {table} WHEN NEW.owner_id IS NULL OR NEW.owner_id != OLD.owner_id
+                    BEGIN SELECT RAISE(ABORT, 'teacher owner cannot change'); END''')
+            for table in ('class_memberships', 'assignment_students', 'batch_photos'):
+                columns = {column['name'] for column in conn.execute(f'PRAGMA table_info({table})')}
+                if 'owner_id' not in columns:
+                    if conn.execute(f'SELECT 1 FROM {table} LIMIT 1').fetchone():
+                        raise ValueError('此数据库已有教学数据，需要先核对教师归属。')
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN owner_id INTEGER REFERENCES users(id)')
+                conn.execute(f'CREATE INDEX IF NOT EXISTS {table}_owner ON {table}(owner_id,id)')
+                conn.execute(f'''CREATE TRIGGER IF NOT EXISTS {table}_owned_insert
+                    BEFORE INSERT ON {table} WHEN NEW.owner_id IS NULL
+                    BEGIN SELECT RAISE(ABORT, 'teacher owner required'); END''')
+                conn.execute(f'''CREATE TRIGGER IF NOT EXISTS {table}_owned_update
+                    BEFORE UPDATE ON {table} WHEN NEW.owner_id IS NULL OR NEW.owner_id != OLD.owner_id
+                    BEGIN SELECT RAISE(ABORT, 'teacher owner cannot change'); END''')
+            conn.executescript('''
+                CREATE TRIGGER IF NOT EXISTS assignments_same_owner_insert
+                BEFORE INSERT ON assignments WHEN
+                    NEW.owner_id != (SELECT owner_id FROM tasks WHERE id=NEW.task_id) OR
+                    NEW.owner_id != (SELECT owner_id FROM classes WHERE id=NEW.class_id)
+                BEGIN SELECT RAISE(ABORT, 'assignment owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS assignments_same_owner_update
+                BEFORE UPDATE ON assignments WHEN
+                    NEW.owner_id != (SELECT owner_id FROM tasks WHERE id=NEW.task_id) OR
+                    NEW.owner_id != (SELECT owner_id FROM classes WHERE id=NEW.class_id)
+                BEGIN SELECT RAISE(ABORT, 'assignment owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS class_memberships_same_owner_insert
+                BEFORE INSERT ON class_memberships WHEN
+                    NEW.owner_id != (SELECT owner_id FROM classes WHERE id=NEW.class_id) OR
+                    NEW.owner_id != (SELECT owner_id FROM students WHERE id=NEW.student_id)
+                BEGIN SELECT RAISE(ABORT, 'class membership owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS class_memberships_same_owner_update
+                BEFORE UPDATE ON class_memberships WHEN
+                    NEW.owner_id != (SELECT owner_id FROM classes WHERE id=NEW.class_id) OR
+                    NEW.owner_id != (SELECT owner_id FROM students WHERE id=NEW.student_id)
+                BEGIN SELECT RAISE(ABORT, 'class membership owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS assignment_students_same_owner_insert
+                BEFORE INSERT ON assignment_students WHEN
+                    NEW.owner_id != (SELECT owner_id FROM assignments WHERE id=NEW.assignment_id) OR
+                    NEW.owner_id != (SELECT owner_id FROM students WHERE id=NEW.student_id)
+                BEGIN SELECT RAISE(ABORT, 'assignment student owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS assignment_students_same_owner_update
+                BEFORE UPDATE ON assignment_students WHEN
+                    NEW.owner_id != (SELECT owner_id FROM assignments WHERE id=NEW.assignment_id) OR
+                    NEW.owner_id != (SELECT owner_id FROM students WHERE id=NEW.student_id)
+                BEGIN SELECT RAISE(ABORT, 'assignment student owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS submissions_same_owner_insert
+                BEFORE INSERT ON submissions WHEN
+                    NEW.owner_id != (SELECT owner_id FROM tasks WHERE id=NEW.task_id)
+                BEGIN SELECT RAISE(ABORT, 'submission owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS submissions_same_owner_update
+                BEFORE UPDATE ON submissions WHEN
+                    NEW.owner_id != (SELECT owner_id FROM tasks WHERE id=NEW.task_id)
+                BEGIN SELECT RAISE(ABORT, 'submission owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS batch_photos_same_owner_insert
+                BEFORE INSERT ON batch_photos WHEN
+                    NEW.owner_id != (SELECT owner_id FROM assignments WHERE id=NEW.assignment_id)
+                BEGIN SELECT RAISE(ABORT, 'photo owner mismatch'); END;
+                CREATE TRIGGER IF NOT EXISTS batch_photos_same_owner_update
+                BEFORE UPDATE ON batch_photos WHEN
+                    NEW.owner_id != (SELECT owner_id FROM assignments WHERE id=NEW.assignment_id)
+                BEGIN SELECT RAISE(ABORT, 'photo owner mismatch'); END;
+            ''')
+
+        @app.before_request
+        def tenant_route_guard():
+            if request.endpoint in ('static', 'teacher_login', 'teacher_register', 'teacher_logout'):
+                return
+            if not getattr(g, 'teacher_id', None):
+                fail('此账号不能进入教学工作台。', 403)
+            if request.path == '/settings':
+                fail('识别服务由平台统一配置。', 403)
+            enabled = {'index', 'list_classes', 'create_class', 'get_class', 'update_class',
+                       'list_tasks', 'new_task', 'get_task', 'new_submission', 'upload', 'create_assignments',
+                       'create_member', 'update_member', 'transfer_member', 'import_members',
+                       'search_students', 'get_student', 'update_student', 'get_assignment',
+                       'save_answer_card_format', 'set_assignment_archive', 'append_assignment_student',
+                       'exempt_student', 'roster_submission', 'link_submission', 'get_submission',
+                       'assignment_grades', 'assignment_grades_xlsx', 'workbench_assignments',
+                       'grades', 'sheet', 'answer_card', 'upload_batch_photos',
+                       'list_batch_photos', 'batch_photo_detail', 'batch_photo_image',
+                       'match_batch_photos', 'exclude_photo', 'identify_batch_photo',
+                       'confirm_batch_photo', 'reassign_photo', 'get_image', 'page_preview',
+                       'assignment_attention', 'task_attention', 'save_review', 'undo_quick_review',
+                       'suggestions', 'extract_answers', 'acknowledge_page', 'report', 'history',
+                       'get_grading_job', 'latest_grading_job', 'start_grading_job', 'process_photo',
+                       'submission_job', 'start_submission_job', 'resume_grading_job', 'auto_grade',
+                       'run_ocr', 'visual_reread', 'visual_suggestion_image',
+                       'deletion_preview', 'delete_task',
+                       'class_analysis_json', 'class_analysis_page', 'memories', 'candidates',
+                       'import_memory', 'update_memory'}
+            if request.endpoint not in enabled:
+                fail('此功能的教师数据隔离尚未完成。', 403)
 
     @app.before_request
     def archived_assignment_read_only():
@@ -246,30 +415,6 @@ def create_app(config=None):
         for lock in reversed(g.pop('archive_write_locks', [])):
             lock.release()
 
-    @app.after_request
-    def headers(response):
-        response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['Referrer-Policy'] = 'same-origin'
-        response.headers['X-Frame-Options'] = 'DENY'
-        response.headers['Cache-Control'] = 'no-store'
-        return response
-
-    @app.errorhandler(HTTPException)
-    def http_error(exc):
-        messages = {404: '没有找到这条记录。', 413: '照片超过 10MB，请缩小后重新上传。',
-                    415: '请使用 JSON 请求。', 400: '请求格式不正确。'}
-        message = exc.description if exc.code not in (404, 413, 415) else messages[exc.code]
-        if request.path.startswith('/api/'):
-            return jsonify(error=message), exc.code
-        return render_template('print.html', mode='error', error=message), exc.code
-
-    @app.errorhandler(Exception)
-    def unexpected_error(exc):
-        app.logger.exception('Unexpected request error')
-        if request.path.startswith('/api/'):
-            return jsonify(error='操作失败，已有记录已保留。请重试；详情可查看终端日志。'), 500
-        return render_template('print.html', mode='error', error='操作失败，请重试并查看终端日志。'), 500
-
     def body():
         payload = request.get_json()
         if not isinstance(payload, dict):
@@ -281,6 +426,14 @@ def create_app(config=None):
         found = conn.execute(f'SELECT * FROM {table} WHERE id=?', (record_id,)).fetchone()
         if found is None:
             fail('没有找到这条记录。', 404)
+        if tenant_mode:
+            owner_tables = {'tasks', 'classes', 'students', 'submissions', 'assignments',
+                            'class_memberships', 'assignment_students', 'batch_photos', 'grading_jobs'}
+            if table in owner_tables and found['owner_id'] != g.teacher_id:
+                fail('没有找到这条记录。', 404)
+            if table == 'pages' and conn.execute(
+                    'SELECT owner_id FROM submissions WHERE id=?', (found['submission_id'],)).fetchone()[0] != g.teacher_id:
+                fail('没有找到这条记录。', 404)
         return dict(found)
 
     def questions(conn, task_id):
@@ -432,7 +585,9 @@ def create_app(config=None):
     @app.get('/settings')
     @app.get('/students/<int:record_id>')
     def index(record_id=None):
-        return render_template('index.html', csrf_token=app.config['CSRF_TOKEN'])
+        return render_template('index.html', csrf_token=teacher_auth.csrf_token(app),
+                               teacher_login_enabled=teacher_auth.auth_required(app),
+                               tenant_mode=tenant_mode, teacher_name=getattr(g, 'teacher_name', ''))
 
     @app.get('/api/health')
     def health():
@@ -442,7 +597,9 @@ def create_app(config=None):
     def list_tasks():
         with db() as conn:
             result = []
-            for record in conn.execute('SELECT id FROM tasks ORDER BY id DESC').fetchall():
+            records = (conn.execute('SELECT id FROM tasks WHERE owner_id=? ORDER BY id DESC', (g.teacher_id,))
+                       if tenant_mode else conn.execute('SELECT id FROM tasks ORDER BY id DESC'))
+            for record in records.fetchall():
                 item = task_detail(conn, record['id'])
                 result.append({'id': item['id'], 'name': item['name'], 'created_at': item['created_at'],
                     'question_count': len(item['questions']), 'total_points': item['total_points'],
@@ -493,8 +650,12 @@ def create_app(config=None):
                               text(q.get('context', ''), '题目上下文', 10000, required=False),
                               text(q.get('hint', ''), '提示词', 200, required=False)))
         with db() as conn:
-            tid = conn.execute('INSERT INTO tasks(name,created_at,rules,passage,instructions,source_name) VALUES(?,?,?,?,?,?)',
-                               (name, now(), dumps(RULES), passage, instructions, source_name)).lastrowid
+            if tenant_mode:
+                tid = conn.execute('INSERT INTO tasks(name,created_at,rules,passage,instructions,source_name,owner_id) VALUES(?,?,?,?,?,?,?)',
+                                   (name, now(), dumps(RULES), passage, instructions, source_name, g.teacher_id)).lastrowid
+            else:
+                tid = conn.execute('INSERT INTO tasks(name,created_at,rules,passage,instructions,source_name) VALUES(?,?,?,?,?,?)',
+                                   (name, now(), dumps(RULES), passage, instructions, source_name)).lastrowid
             conn.executemany('INSERT INTO questions(task_id,number,kind,answer,variants,points,context,hint) VALUES(?,?,?,?,?,?,?,?)', [(tid, *q) for q in validated])
             result = task_detail(conn, tid)
         return jsonify(result), 201
@@ -510,7 +671,12 @@ def create_app(config=None):
         with db() as conn:
             row(conn, 'tasks', tid)
             stamp = now()
-            sid = conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at) VALUES(?,?,?,?)', (tid, code, stamp, stamp)).lastrowid
+            if tenant_mode:
+                sid = conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at,owner_id) VALUES(?,?,?,?,?)',
+                                   (tid, code, stamp, stamp, g.teacher_id)).lastrowid
+            else:
+                sid = conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at) VALUES(?,?,?,?)',
+                                   (tid, code, stamp, stamp)).lastrowid
             conn.execute('INSERT INTO reviews(submission_id,question_id) SELECT ?,id FROM questions WHERE task_id=?', (sid, tid))
         return jsonify(id=sid), 201
 
@@ -754,10 +920,9 @@ def create_app(config=None):
                         or qid in detail.get('visual_suggestions', {})):
                     continue
                 remaining -= 1
-                with app.test_client() as client:
-                    client.post(f'/api/submissions/{sid}/reviews/{qid}/visual-reread',
-                                json=crop, headers={'X-CSRF-Token': app.config['CSRF_TOKEN']},
-                                environ_overrides={'moxieben.automatic_visual': True})
+                teacher_auth.internal_post(app, f'/api/submissions/{sid}/reviews/{qid}/visual-reread',
+                                           crop, owner_id=g.teacher_id if tenant_mode else None,
+                                           environ={'moxieben.automatic_visual': True})
                 if remaining == 0:
                     return
 
@@ -766,6 +931,7 @@ def create_app(config=None):
     @app.get('/api/submissions/<int:sid>/visual-suggestions/<int:vid>/image')
     def visual_suggestion_image(sid, vid):
         with db() as conn:
+            row(conn, 'submissions', sid)
             found = conn.execute('''SELECT v.result,p.image FROM visual_suggestions v
                 JOIN pages p ON p.id=v.page_id WHERE v.id=? AND v.submission_id=?''', (vid,sid)).fetchone()
         if found is None:

@@ -11,7 +11,15 @@ py -3.11 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-以后直接运行：
+首次使用教师登录时，等后台批改完成后关闭本地网站，再在项目目录运行下面的命令。按提示设置账号和至少 8 个字符的密码，输入密码时终端不会显示内容。
+
+```powershell
+.venv\Scripts\python.exe -m flask --app app teacher-account
+```
+
+需要更换账号或重置密码时，先关闭网站并在同一条命令末尾加上 `--reset`。重置后旧登录会话失效。当前仅支持一位老师使用。
+
+设置好账号后运行：
 
 ```powershell
 .\start.ps1
@@ -427,3 +435,20 @@ Paddle 云端请求现默认启用文档方向分类；关闭变形矫正，保�
 ### 异常题视觉复读
 
 模型配置、手动复读及试点自动复读的范围见 [视觉复读实施说明](docs/VLM-REVIEW-01-IMPLEMENTATION.md)。
+
+### 多教师本机工作台
+
+`start.bat` 和 `start.ps1` 检测到 `%LOCALAPPDATA%\Moxieben\TenantData\dictation.sqlite3` 后，会使用教师账号登录及按账号隔离的数据。每位教师只看到自己的班级、作业、答卷、照片、成绩和后台任务；OCR 配置由平台统一管理。当前网站仍只监听本机，公网部署需要单独完成服务器和安全验收。
+
+旧单教师数据迁移使用 `scripts/migrate_single_teacher.py`。先停止网站，确认没有运行中的批改任务，再指定旧数据目录、账号库、独立目标目录和归属教师邮箱。程序创建新副本并校验数据库与照片，不覆盖目标目录；原 `data` 目录保留用于回退。账号密码沿用账号库中已有的安全哈希，迁移不会生成或显示密码。
+
+### 多教师账号独立预览（MP-02A 历史入口）
+
+在单独的 PowerShell 窗口运行以下命令，然后打开 <http://127.0.0.1:5041/teacher/register>。此端口仅用于独立账号页面预览，不承载教学数据。正常使用请打开 `start.bat` 对应的 5000 端口。
+
+```powershell
+$env:MOXIEBEN_ACCOUNT_PREVIEW_DIR = Join-Path $env:LOCALAPPDATA 'Moxieben/AccountPreview'
+.venv\Scripts\python.exe -m flask --app app run --host 127.0.0.1 --port 5041
+```
+
+在同样已设置预览目录的窗口中，可用 `.venv\Scripts\python.exe -m flask --app app platform-admin` 交互式创建平台管理员；用 `.venv\Scripts\python.exe -m flask --app app account-status teacher-a@example.test --disable` 禁用虚构测试账号并撤销会话，用 `--enable` 恢复。验证命令为 `.venv\Scripts\python.exe -m unittest -q test_accounts test_teacher_auth`。邮箱验证和密码找回留待后续账号阶段。

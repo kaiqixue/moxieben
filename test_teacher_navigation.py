@@ -43,6 +43,7 @@ class TeacherNavigationTests(unittest.TestCase):
         before = {path: self.client.get(path).json for path in detail_paths}
         self.assertTrue(all(value is not None for value in before.values()))
         before[detail_paths[0]]['assignment'].pop('archived')
+        before[detail_paths[0]].pop('generated_at')
         for archived in (True, True, False):
             response = self.client.patch(endpoint, json={'archived': archived}, headers=self.headers)
             self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
@@ -58,6 +59,7 @@ class TeacherNavigationTests(unittest.TestCase):
                 current = self.client.get(path).json
                 if path.endswith('/analysis'):
                     self.assertEqual(current['assignment'].pop('archived'), int(archived))
+                    current.pop('generated_at')
                 self.assertEqual(current, original)
             self.assertEqual(self.client.get(f'/api/pages/{page_id}/preview').status_code, 200)
 

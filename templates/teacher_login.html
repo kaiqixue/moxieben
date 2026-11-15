@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  {% set title = '账号预览工作台' if user else ('注册教师账号' if is_register else '教师登录') %}
+  {% set account_form = is_register or (preview and not user) %}
+  <title>{{ title }} · 默写本</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='teacher-login.css') }}">
+</head>
+<body class="teacher-login{% if account_form %} register-page{% endif %}">
+  {% if account_form %}
+  <div class="register-layout">
+    <section class="register-intro" aria-label="默写本介绍">
+      <div class="login-brand"><span aria-hidden="true">M</span> 默写本</div>
+      <h2>让批改更高效，<br>让教学更从容。</h2>
+      <p class="register-subtitle">把重复的批改工作交给系统，把更多时间留给教学。</p>
+      <img class="register-hero" src="{{ url_for('static', filename='images/teacher-desk.png') }}" alt="">
+      <ul class="register-values">
+        <li><strong>智能识别</strong><span>减少手动录入，提高答卷处理效率。</span></li>
+        <li><strong>高效核对</strong><span>辅助发现识别异常，保留教师最终判断权。</span></li>
+        <li><strong>成绩管理</strong><span>集中查看作业进度与学生成绩。</span></li>
+      </ul>
+    </section>
+  {% endif %}
+  <main class="login-card" aria-labelledby="login-title">
+    {% if not account_form %}<div class="login-brand"><span aria-hidden="true">M</span> 默写本</div>{% endif %}
+    <h1 id="login-title">{{ title }}</h1>
+    {% if is_register %}<p class="register-form-intro">创建账号，开始使用默写本。</p>{% endif %}
+    {% if account_form and not is_register %}<p class="register-form-intro">欢迎回来，继续使用默写本。</p>{% endif %}
+    {% if error %}<p role="alert" class="login-error">{{ error }}</p>{% endif %}
+    {% if user %}
+      <p>{{ user.name }} · {{ '平台管理员' if user.role == 'platform_admin' else '教师' }}</p>
+      <p class="login-setup">登录成功。此预览用于体验账号流程，班级和作业将在数据隔离完成后开放。</p>
+      <form method="post" action="{{ url_for('teacher_logout') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn primary">退出登录</button>
+      </form>
+    {% elif is_register %}
+      <form method="post" action="{{ url_for('teacher_register') }}" id="register-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label for="teacher-name">教师姓名</label>
+        <input id="teacher-name" name="name" value="{{ name }}" maxlength="80" autocomplete="name" required>
+        <label for="teacher-email">邮箱</label>
+        <input type="email" id="teacher-email" name="email" value="{{ email }}" maxlength="254" autocomplete="username" required>
+        <label for="teacher-password">密码（至少 8 个字符）</label>
+        <div class="password-field"><input type="password" id="teacher-password" name="password" minlength="8" maxlength="128" autocomplete="new-password" required><button type="button" class="password-toggle" aria-controls="teacher-password" aria-label="显示密码" aria-pressed="false">显示</button></div>
+        <label for="teacher-password-confirm">确认密码</label>
+        <div class="password-field"><input type="password" id="teacher-password-confirm" name="confirm_password" minlength="8" maxlength="128" autocomplete="new-password" required><button type="button" class="password-toggle" aria-controls="teacher-password-confirm" aria-label="显示确认密码" aria-pressed="false">显示</button></div>
+        <button type="submit" class="btn primary">注册并登录</button>
+      </form>
+      <p class="login-alternate"><a href="{{ url_for('teacher_login') }}">已有账号，去登录</a></p>
+    {% elif ready %}
+      <form method="post" action="{{ url_for('teacher_login') }}"{% if account_form %} id="login-form"{% endif %}>
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="next" value="{{ target }}">
+        {% if preview %}
+          <label for="teacher-email">邮箱</label>
+          <input type="email" id="teacher-email" name="email" value="{{ email }}" maxlength="254" autocomplete="username" required>
+        {% else %}
+          <label for="teacher-username">账号</label>
+          <input id="teacher-username" name="username" value="{{ username }}" maxlength="64" autocomplete="username" required>
+        {% endif %}
+        <label for="teacher-password">密码</label>
+        {% if account_form %}<div class="password-field">{% endif %}<input type="password" id="teacher-password" name="password" maxlength="128" autocomplete="current-password" required>{% if account_form %}<button type="button" class="password-toggle" aria-controls="teacher-password" aria-label="显示密码" aria-pressed="false">显示</button></div>{% endif %}
+        <button type="submit" class="btn primary">登录教师工作台</button>
+      </form>
+      {% if preview %}<p class="login-alternate"><a href="{{ url_for('teacher_register') }}">注册教师账号</a></p>{% endif %}
+    {% else %}
+      <p class="login-setup">请先在本机创建老师账号，再刷新页面登录。</p>
+    {% endif %}
+  </main>
+  {% if account_form %}</div><script src="{{ url_for('static', filename='register.js') }}" defer></script>{% endif %}
+</body>
+</html>

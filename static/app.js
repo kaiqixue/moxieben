@@ -224,7 +224,7 @@ async function route() {
   attentionQueue = null;attentionContext=null;attentionLoadError='';photoRotations.clear();
   const version = ++state.routeVersion;
   const path = location.pathname;
-  const navMore=$('.nav-more');if(navMore)navMore.open=path==='/settings';
+  const navMore=$('.nav-more');if(navMore)navMore.open=path==='/settings' && !matchMedia('(max-width: 680px)').matches;
   lastPath = path+location.search;
   $('#main').innerHTML = loadingHTML('正在加载…');
   try {

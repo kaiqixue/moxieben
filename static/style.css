@@ -22,6 +22,8 @@
 .topbar{height:76px;display:flex;align-items:center;justify-content:space-between;padding:0 42px;border-bottom:1px solid var(--border);background:#fff}
 .breadcrumb{color:var(--content-muted);font-size:12px}
 .local-badge{display:flex;align-items:center;color:var(--content-muted);font-size:12px}
+.teacher-logout{margin-inline-start:8px}
+@media(max-width:680px){.teacher-logout .btn{min-height:44px}}
 .avatar{margin-left:20px;display:grid;place-items:center;width:33px;height:33px;background:var(--surface-accent);color:var(--content-secondary);border-radius:50%;font-size:14px}
 main{padding:32px;max-width:1660px;width:100%;margin:auto;flex:1}
 /* Route focus belongs to the heading, rather than a blue frame around the whole page. */
