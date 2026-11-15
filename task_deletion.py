@@ -44,6 +44,9 @@ def register(app, db, row, database, uploads):
 
     @app.delete('/api/tasks/<int:tid>')
     def delete_task(tid):
+        if app.config.get('PRODUCTION_MODE'):
+            # Local deletion snapshots the entire DB, unsuitable for untrusted tenants.
+            abort(403, description='服务器版暂未开放永久删除，请先归档；数据不会被删除。')
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict) or payload.get('confirmed') is not True or not isinstance(payload.get('expected_counts'), dict):
             abort(400, description='请先查看删除范围并明确确认删除。')

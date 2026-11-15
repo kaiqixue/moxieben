@@ -144,6 +144,17 @@ def create_app(config=None):
 
     @app.before_request
     def local_only():
+        if app.config.get('PRODUCTION_MODE'):
+            if teacher_auth.is_internal_request():
+                return
+            if request.endpoint == 'healthz':
+                return
+            if request.host_url.rstrip('/') != app.config['PUBLIC_ORIGIN']:
+                fail('请从本站 HTTPS 地址访问。', 403)
+            if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                if request.headers.get('Origin') != app.config['PUBLIC_ORIGIN']:
+                    fail('请求来源不匹配，请刷新本站页面后重试。', 403)
+            return
         if request.host.split(':')[0] not in ('localhost', '127.0.0.1'):
             fail('此网站仅供本机访问。', 403)
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
@@ -170,7 +181,10 @@ def create_app(config=None):
 
     @app.errorhandler(Exception)
     def unexpected_error(exc):
-        app.logger.exception('Unexpected request error')
+        if app.config.get('PRODUCTION_MODE'):
+            app.logger.error('Request failed endpoint=%s error_type=%s', request.endpoint, type(exc).__name__)
+        else:
+            app.logger.exception('Unexpected request error')
         if request.path.startswith('/api/'):
             return jsonify(error='操作失败，已有记录已保留。请重试；详情可查看终端日志。'), 500
         return render_template('print.html', mode='error', error='操作失败，请重试并查看终端日志。'), 500
@@ -318,7 +332,7 @@ def create_app(config=None):
 
         @app.before_request
         def tenant_route_guard():
-            if request.endpoint in ('static', 'teacher_login', 'teacher_register', 'teacher_logout'):
+            if request.endpoint in ('static', 'teacher_login', 'teacher_register', 'teacher_logout', 'healthz'):
                 return
             if not getattr(g, 'teacher_id', None):
                 fail('此账号不能进入教学工作台。', 403)
@@ -592,6 +606,15 @@ def create_app(config=None):
     @app.get('/api/health')
     def health():
         return jsonify(ocr=ocr_status(), storage='sqlite', rules=RULES)
+
+    @app.get('/healthz')
+    def healthz():
+        try:
+            with db() as conn:
+                conn.execute('SELECT 1 FROM tasks LIMIT 1').fetchone()
+            return jsonify(status='ok')
+        except sqlite3.Error:
+            return jsonify(status='unavailable'), 503
 
     @app.get('/api/tasks')
     def list_tasks():

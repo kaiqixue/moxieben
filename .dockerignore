@@ -1,0 +1,10 @@
+# Build input allowlist: never send teaching data, .env, secrets or Git history.
+**
+!/*.py
+/test_*.py
+!/requirements-server.txt
+!/templates/
+!/templates/**
+!/static/
+!/static/**
+!/Dockerfile

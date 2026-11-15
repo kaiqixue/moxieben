@@ -17,6 +17,10 @@ _INTERNAL_REQUEST = object()
 SESSION_SECONDS = 12 * 60 * 60
 
 
+def is_internal_request():
+    return request.environ.get('moxieben.internal_request') is _INTERNAL_REQUEST
+
+
 def internal_post(app, path, payload, *, owner_id=None, environ=None):
     """Use a server-only WSGI value, never an HTTP header, for queued work."""
     with app.test_client() as client:
@@ -139,7 +143,7 @@ def register(app, db):
 
     @app.before_request
     def teacher_gate():
-        if not auth_required(app) or request.endpoint in ('static', 'teacher_login', 'teacher_register'):
+        if not auth_required(app) or request.endpoint in ('static', 'teacher_login', 'teacher_register', 'healthz'):
             return
         if request.environ.get('moxieben.internal_request') is _INTERNAL_REQUEST and not preview:
             if accounts:
@@ -244,12 +248,15 @@ def register(app, db):
 
     def preview_page(error='', status=200, *, is_register=False, name='', email=''):
         return render_template('teacher_login.html', csrf_token=csrf_token(app), ready=True, preview=True,
+                               registration_open=app.config.get('TEACHER_REGISTRATION_OPEN', True),
                                is_register=is_register, error=error, name=name, email=email, target='/'), status
 
     @app.route('/teacher/register', methods=('GET', 'POST'))
     def teacher_register():
         if not accounts:
             abort(404)
+        if not app.config.get('TEACHER_REGISTRATION_OPEN', True):
+            abort(403, description='当前暂未开放注册，请联系平台负责人。')
         if request.method != 'POST':
             return redirect('/') if actor() else preview_page(is_register=True)
         name = request.form.get('name', '').strip()

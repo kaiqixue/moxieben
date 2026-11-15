@@ -1,5 +1,13 @@
 # demo1 英语默写批改
 
+## 服务器部署候选版本（DEPLOY-IMPLEMENT-01）
+
+新增 Docker Compose、Caddy、Gunicorn 单进程、独立数据目录与密钥文件配置。服务器版保留云端 Paddle OCR、多教师隔离和教师核对，不在镜像安装本地 Paddle 模型。默认仅绑定服务器回环地址，注册默认关闭；本轮未部署阿里云，也未开放公网。正式发布状态见 [改造与验收报告](docs/DEPLOY/DEPLOY-IMPLEMENT-01-REPORT.md)，不能以容器启动代替权限和恢复验收。
+
+- [服务器实际操作手册](docs/DEPLOY/SERVER-OPERATIONS.md)
+- [生产配置说明](docs/DEPLOY/PRODUCTION-CONFIG.md)
+- Compose：`docker-compose.yml`；生产入口：`wsgi.py`；依赖：`requirements-server.txt`。下文本机启动方式不用于生产。
+
 本版本供一位教师在本机使用，流程是：建立班级与名册 → 从 Excel 或 Word 建立任务并按班布置 → 上传照片 → 自动匹配学生 → 识别并自动计分 → 显示最终成绩 → 教师按需改判和导出。支持本机 PaddleOCR、PaddleOCR-VL 云端及 OpenAI 兼容图片接口。
 
 ## 启动
