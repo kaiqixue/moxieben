@@ -25,15 +25,26 @@
       <a class="nav-item" href="/assignments" data-nav>作业管理</a>
       <a class="nav-item" href="/classes" data-nav>班级与学生</a>
       <details class="nav-more"><summary class="nav-item">更多</summary><div class="nav-menu">
-        <a class="nav-item" href="/settings" data-nav>识别设置</a>
+        {% if not tenant_mode %}<a class="nav-item" href="/settings" data-nav>识别设置</a>{% endif %}
         <button class="nav-item" id="guide-button">操作指南</button>
       </div></details>
     </nav>
-    <div class="sidebar-note"><span class="privacy-dot"></span> 本地工作空间<p>记录保存在本机；云端模式会发送照片到配置服务。<br>自动出成绩，老师可核对改判。</p></div>
+    <div class="sidebar-note"><span class="privacy-dot"></span> {{ '个人工作空间' if tenant_mode else '本地工作空间' }}<p>{{ '班级和成绩仅当前账号可见；云端识别会发送照片到平台配置的服务。' if tenant_mode else '记录保存在本机；云端模式会发送照片到配置服务。' }}<br>自动出成绩，老师可核对改判。</p></div>
     <div class="sidebar-footer">让批改更轻松，让反馈更清晰。</div>
   </aside>
   <div class="app-shell">
-    <header class="topbar"><div class="breadcrumb" id="breadcrumb">工作台 / 默写批改</div><div class="local-badge"><span class="privacy-dot"></span> 本地运行 <span class="avatar" aria-label="教师">师</span></div></header>
+    <header class="topbar">
+      <div class="breadcrumb" id="breadcrumb">工作台 / 默写批改</div>
+      <div class="local-badge">
+        <span class="privacy-dot"></span> {{ teacher_name if tenant_mode else '本地运行' }} <span class="avatar" aria-label="教师">师</span>
+        {% if teacher_login_enabled %}
+        <form class="teacher-logout" method="post" action="{{ url_for('teacher_logout') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button class="btn small" type="submit">退出登录</button>
+        </form>
+        {% endif %}
+      </div>
+    </header>
     <main id="main" tabindex="-1"><div class="loading" role="status" aria-live="polite"><p>正在打开工作台…</p><div class="skeleton" aria-hidden="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="skeleton-line"></span><span class="skeleton-line"></span></div></div></main>
     <footer class="page-footer">默写本 · 每一份认真，都值得被看见</footer>
   </div>

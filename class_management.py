@@ -8,7 +8,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Response, jsonify, request, send_file
+from flask import Response, g, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
 from openpyxl import load_workbook
 from openpyxl import Workbook
@@ -79,6 +79,7 @@ def migrate_assignment_archive(conn):
 
 def register_class_routes(app, db, body, row, submission_detail, task_detail, submission_summaries):
     from app import fail, integer, text
+    tenant_mode = app.config.get('TEACHER_TENANT_MODE', False)
 
     def boolean(payload, key, default=False):
         value = payload.get(key, default)
@@ -106,8 +107,18 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
                 fail('该学生已在班级名单中。', 409)
         else:
             name = text(payload.get('name'), '姓名', 120)
-            sid = conn.execute('INSERT INTO students(name,created_at) VALUES(?,?)', (name, stamp())).lastrowid
-        mid = conn.execute('INSERT INTO class_memberships(class_id,student_id,student_code,joined_at) VALUES(?,?,?,?)', (cid, sid, code, stamp())).lastrowid
+            if tenant_mode:
+                sid = conn.execute('INSERT INTO students(name,created_at,owner_id) VALUES(?,?,?)',
+                                   (name, stamp(), g.teacher_id)).lastrowid
+            else:
+                sid = conn.execute('INSERT INTO students(name,created_at) VALUES(?,?)',
+                                   (name, stamp())).lastrowid
+        if tenant_mode:
+            mid = conn.execute('INSERT INTO class_memberships(class_id,student_id,student_code,joined_at,owner_id) VALUES(?,?,?,?,?)',
+                               (cid, sid, code, stamp(), g.teacher_id)).lastrowid
+        else:
+            mid = conn.execute('INSERT INTO class_memberships(class_id,student_id,student_code,joined_at) VALUES(?,?,?,?)',
+                               (cid, sid, code, stamp())).lastrowid
         return dict(conn.execute('SELECT m.*,s.name FROM class_memberships m JOIN students s ON s.id=m.student_id WHERE m.id=?', (mid,)).fetchone())
 
     def assignment_detail(conn, aid):
@@ -228,7 +239,9 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
     def list_classes():
         with db() as conn:
             items = []
-            for record in conn.execute('SELECT id FROM classes ORDER BY archived,id DESC').fetchall():
+            records = (conn.execute('SELECT id FROM classes WHERE owner_id=? ORDER BY archived,id DESC', (g.teacher_id,))
+                       if tenant_mode else conn.execute('SELECT id FROM classes ORDER BY archived,id DESC'))
+            for record in records.fetchall():
                 item = class_detail(conn, record['id'])
                 items.append({k: item[k] for k in ('id', 'name', 'term', 'archived', 'student_count', 'pending_count')})
             return jsonify(classes=items)
@@ -239,7 +252,12 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
         name = text(payload.get('name'), '班级名称', 120)
         term = text(payload.get('term', ''), '学年/学期', 120, required=False).strip()
         with db() as conn:
-            cid = conn.execute('INSERT INTO classes(name,term,created_at) VALUES(?,?,?)', (name, term, stamp())).lastrowid
+            if tenant_mode:
+                cid = conn.execute('INSERT INTO classes(name,term,created_at,owner_id) VALUES(?,?,?,?)',
+                                   (name, term, stamp(), g.teacher_id)).lastrowid
+            else:
+                cid = conn.execute('INSERT INTO classes(name,term,created_at) VALUES(?,?,?)',
+                                   (name, term, stamp())).lastrowid
             return jsonify(class_detail(conn, cid)), 201
 
     @app.get('/api/classes/<int:cid>')
@@ -492,7 +510,14 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
         query = text(request.args.get('q', ''), '搜索条件', 120, required=False).strip()
         # Literal substring search: percent/underscore in names are not SQL wildcards.
         with db() as conn:
-            students = [dict(s) for s in conn.execute('SELECT * FROM students WHERE instr(name,?)>0 OR instr(COALESCE(school_code,\'\'),?)>0 OR id IN (SELECT student_id FROM class_memberships WHERE instr(student_code,?)>0) ORDER BY active DESC,name,id LIMIT 100', (query, query, query))]
+            if tenant_mode:
+                records = conn.execute('''SELECT * FROM students WHERE owner_id=? AND
+                    (instr(name,?)>0 OR instr(COALESCE(school_code,''),?)>0 OR id IN
+                    (SELECT student_id FROM class_memberships WHERE instr(student_code,?)>0))
+                    ORDER BY active DESC,name,id LIMIT 100''', (g.teacher_id, query, query, query))
+            else:
+                records = conn.execute('SELECT * FROM students WHERE instr(name,?)>0 OR instr(COALESCE(school_code,\'\'),?)>0 OR id IN (SELECT student_id FROM class_memberships WHERE instr(student_code,?)>0) ORDER BY active DESC,name,id LIMIT 100', (query, query, query))
+            students = [dict(s) for s in records]
             return jsonify(students=students)
 
     @app.get('/api/students/<int:sid>')
@@ -533,13 +558,21 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
             if code is not None:
                 code = text(code, '校级学号', 80, required=False).strip() or None
             active = boolean(payload, 'active', bool(item['active']))
-            if code and conn.execute('SELECT id FROM students WHERE school_code=? AND id!=?', (code, sid)).fetchone():
+            duplicate = (conn.execute('SELECT id FROM students WHERE owner_id=? AND school_code=? AND id!=?',
+                                      (g.teacher_id, code, sid)) if tenant_mode and code else
+                         conn.execute('SELECT id FROM students WHERE school_code=? AND id!=?', (code, sid)) if code else None)
+            if duplicate and duplicate.fetchone():
                 fail('校级学号已对应其他学生，请检查后再修改。', 409)
             conn.execute('UPDATE students SET name=?,school_code=?,active=? WHERE id=?', (name, code, active, sid))
             return jsonify(row(conn, 'students', sid))
 
     def add_assignment_student(conn, aid, student):
-        conn.execute('INSERT OR IGNORE INTO assignment_students(assignment_id,student_id,student_code,name,created_at) VALUES(?,?,?,?,?)', (aid, student['student_id'], student['student_code'], student['name'], stamp()))
+        if tenant_mode:
+            conn.execute('INSERT OR IGNORE INTO assignment_students(assignment_id,student_id,student_code,name,created_at,owner_id) VALUES(?,?,?,?,?,?)',
+                         (aid, student['student_id'], student['student_code'], student['name'], stamp(), g.teacher_id))
+        else:
+            conn.execute('INSERT OR IGNORE INTO assignment_students(assignment_id,student_id,student_code,name,created_at) VALUES(?,?,?,?,?)',
+                         (aid, student['student_id'], student['student_code'], student['name'], stamp()))
 
     @app.post('/api/tasks/<int:tid>/assignments')
     def create_assignments(tid):
@@ -557,7 +590,12 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
                 if existing:
                     aid = existing['id']
                 else:
-                    aid = conn.execute('INSERT INTO assignments(task_id,class_id,class_name,term,created_at) VALUES(?,?,?,?,?)', (tid, klass['id'], klass['name'], klass['term'], stamp())).lastrowid
+                    if tenant_mode:
+                        aid = conn.execute('INSERT INTO assignments(task_id,class_id,class_name,term,created_at,owner_id) VALUES(?,?,?,?,?,?)',
+                                           (tid, klass['id'], klass['name'], klass['term'], stamp(), g.teacher_id)).lastrowid
+                    else:
+                        aid = conn.execute('INSERT INTO assignments(task_id,class_id,class_name,term,created_at) VALUES(?,?,?,?,?)',
+                                           (tid, klass['id'], klass['name'], klass['term'], stamp())).lastrowid
                     for student in conn.execute('SELECT m.student_id,m.student_code,s.name FROM class_memberships m JOIN students s ON s.id=m.student_id WHERE m.class_id=? AND m.active=1 AND s.active=1', (klass['id'],)).fetchall():
                         add_assignment_student(conn, aid, student)
                 result.append(assignment_detail(conn, aid))
@@ -623,7 +661,12 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
             assignment = row(conn, 'assignments', roster['assignment_id'])
             editable_class(conn, assignment['class_id'])
             timestamp = stamp()
-            sid = conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at,assignment_student_id) VALUES(?,?,?,?,?)', (assignment['task_id'], roster['student_code'], timestamp, timestamp, rid)).lastrowid
+            if tenant_mode:
+                sid = conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at,assignment_student_id,owner_id) VALUES(?,?,?,?,?,?)',
+                                   (assignment['task_id'], roster['student_code'], timestamp, timestamp, rid, g.teacher_id)).lastrowid
+            else:
+                sid = conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at,assignment_student_id) VALUES(?,?,?,?,?)',
+                                   (assignment['task_id'], roster['student_code'], timestamp, timestamp, rid)).lastrowid
             conn.execute('INSERT INTO reviews(submission_id,question_id) SELECT ?,id FROM questions WHERE task_id=?', (sid, assignment['task_id']))
             return jsonify(id=sid), 201
 

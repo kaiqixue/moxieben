@@ -1,0 +1,89 @@
+.teacher-login {
+  min-height: 100svh;
+  padding: 24px 16px;
+  display: grid;
+  place-items: center;
+}
+.login-card {
+  width: min(100%, 420px);
+  padding: clamp(24px, 6vw, 40px);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface-panel);
+  box-shadow: var(--shadow-2);
+}
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--content-secondary);
+  font-weight: 650;
+}
+.login-brand span {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+  color: var(--content-inverse);
+  background: var(--accent-primary);
+  font: 700 23px Georgia, serif;
+}
+.login-card h1 {
+  font-size: 28px;
+  margin: 20px 0;
+}
+.login-card form { display: grid; gap: 8px; }
+.login-card label { font-size: 14px; font-weight: 600; }
+.login-card input:not([type="hidden"]) {
+  width: 100%;
+  min-height: 46px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius);
+  font-size: 16px;
+}
+.login-card .btn { min-height: 46px; margin-top: 8px; }
+.login-alternate { margin: 12px 0 0; }
+.login-alternate a { display: inline-flex; align-items: center; min-height: 44px; text-decoration: underline; }
+.login-error, .login-setup {
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--surface-danger);
+  color: var(--status-danger);
+}
+.login-setup { background: var(--surface-accent); color: var(--content-secondary); }
+
+.teacher-login.register-page { display: block; position: relative; isolation: isolate; overflow-x: clip; padding: 0; background: linear-gradient(135deg, #faf9f5 35%, #f5f2f8 100%); color: #34343a; }
+.register-layout { position: relative; width: min(1320px, 100%); min-height: 100svh; margin: auto; display: grid; grid-template-columns: 52fr 48fr; align-items: center; gap: clamp(32px, 5vw, 80px); padding: 40px clamp(24px, 5vw, 72px); }
+.register-intro { min-width: 0; }
+.register-intro .login-brand { color: #34343a; font-size: 20px; }
+.register-intro .login-brand span { background: #7560a1; }
+.register-intro h2 { margin: 36px 0 14px; font-size: clamp(30px, 3vw, 42px); line-height: 1.35; letter-spacing: .01em; }
+.register-subtitle { margin: 0; color: #62616a; line-height: 1.7; }
+.register-hero { display: block; width: 100%; max-height: 380px; margin: 28px 0; object-fit: cover; aspect-ratio: 3 / 2; border-radius: 10px; }
+.register-values { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 0; padding: 0; list-style: none; }
+.register-values li { border-top: 2px solid #a8bdaa; padding-top: 12px; font-size: 13px; line-height: 1.6; }
+.register-values strong, .register-values span { display: block; }
+.register-values strong { color: #51436f; font-size: 14px; margin-bottom: 4px; }
+.register-values span { color: #62616a; }
+.register-page .login-card { width: 100%; max-width: 480px; justify-self: center; padding: clamp(28px, 4vw, 48px); border: 1px solid rgba(255,255,255,.9); border-radius: 12px; background: rgba(255,255,255,.76); backdrop-filter: blur(18px); box-shadow: 0 18px 48px rgba(77, 62, 99, .12), inset 0 1px 0 rgba(255,255,255,.9); animation: register-enter .55s ease-out both; }
+.register-page .login-card h1 { margin: 0 0 10px; font-size: 26px; }
+.register-form-intro { margin: 0 0 26px; color: #686670; font-size: 14px; }
+.register-page .login-card form { gap: 8px; }
+.register-page .login-card input:not([type="hidden"]) { border-color: #d9d5de; border-radius: 8px; min-height: 48px; background: rgba(255,255,255,.72); transition: border-color .2s, box-shadow .2s; }
+.register-page .login-card input:not([type="hidden"]):focus { border-color: #7560a1; box-shadow: 0 0 0 3px rgba(117,96,161,.14); }
+.register-page input:focus-visible, .register-page button:focus-visible, .register-page a:focus-visible { outline: 3px solid #7560a1; outline-offset: 2px; }
+.register-page .login-card .btn.primary { background: #7560a1; border-color: #7560a1; color: white; min-height: 48px; }
+.register-page .login-card .btn.primary:hover { background: #604c89; transform: translateY(-2px); }
+.register-page .login-card .btn:disabled { opacity: .7; cursor: wait; }
+.register-page .login-alternate { text-align: center; }
+.register-page .login-alternate a { color: #604c89; }
+.password-field { position: relative; }
+.register-page .password-field input { padding-right: 70px; }
+.password-toggle { position: absolute; right: 4px; top: 2px; min-width: 56px; min-height: 44px; border: 0; background: transparent; color: #604c89; cursor: pointer; }
+@keyframes register-enter { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: reduce) { .register-page .login-card { animation: none; } .register-page .login-card .btn.primary:hover { transform: none; } .register-page .login-card input:not([type="hidden"]), .register-page .login-card .btn { transition: none; } }
+@media (max-width: 900px) { .register-layout { gap: 30px; padding: 32px 24px; } .register-values { grid-template-columns: 1fr; gap: 8px; } .register-values li { padding-top: 6px; } .register-hero { max-height: 300px; } }
+@media (max-width: 680px) { .register-layout { display: flex; flex-direction: column; align-items: stretch; overflow: hidden; padding: 24px 16px 40px; gap: 24px; } .register-intro h2 { margin: 24px 0 10px; font-size: 28px; } .register-hero { margin: 20px 0; max-height: none; } .register-page .login-card { max-width: none; padding: 26px 22px; } }

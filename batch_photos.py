@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from flask import jsonify, request, send_file
+from flask import g, jsonify, request, send_file
 from werkzeug.exceptions import HTTPException
 
 from ocr_engine import recognize_identity as recognize
@@ -60,6 +60,7 @@ def _json(value):
 def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo, submission_summaries):
     from app import fail, integer, upload_answer_layout
     name_memory.register(app, db, row)
+    tenant_mode = app.config.get('TEACHER_TENANT_MODE', False)
 
     def photo_dict(record):
         item = dict(record)
@@ -305,10 +306,13 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
                         fail('本班有未完成的后台任务，请先完成或继续该任务，再上传新照片。', 409)
                     (uploads / original).write_bytes(raw)
                     image.save(uploads / display, format='PNG')
-                    pid = conn.execute('''INSERT INTO batch_photos
-                        (assignment_id,original,image,width,height,created_at,updated_at,answer_layout,upload_id)
-                        VALUES(?,?,?,?,?,?,?,?,?)''',
-                        (aid, original, display, image.width, image.height, stamp(), stamp(), layout, upload_id)).lastrowid
+                    values = (aid, original, display, image.width, image.height, stamp(), stamp(), layout, upload_id)
+                    columns = 'assignment_id,original,image,width,height,created_at,updated_at,answer_layout,upload_id'
+                    if tenant_mode:
+                        columns += ',owner_id'
+                        values += (g.teacher_id,)
+                    pid = conn.execute(f'INSERT INTO batch_photos({columns}) VALUES({",".join("?" for _ in values)})',
+                                       values).lastrowid
                     saved.append(photo_dict(conn.execute('SELECT * FROM batch_photos WHERE id=?', (pid,)).fetchone()))
             except Exception:
                 (uploads / original).unlink(missing_ok=True)
@@ -469,8 +473,13 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
             return dict(submission_id=photo['submission_id'], page_id=photo['page_id'], photo=photo_dict(photo))
         submission = conn.execute('SELECT * FROM submissions WHERE assignment_student_id=?', (rid,)).fetchone()
         if submission is None:
-            submission_id = conn.execute('''INSERT INTO submissions(task_id,student_code,created_at,updated_at,assignment_student_id)
-                VALUES(?,?,?,?,?)''', (assignment['task_id'], roster['student_code'], stamp(), stamp(), rid)).lastrowid
+            values = (assignment['task_id'], roster['student_code'], stamp(), stamp(), rid)
+            columns = 'task_id,student_code,created_at,updated_at,assignment_student_id'
+            if tenant_mode:
+                columns += ',owner_id'
+                values += (g.teacher_id,)
+            submission_id = conn.execute(f'INSERT INTO submissions({columns}) VALUES({",".join("?" for _ in values)})',
+                                         values).lastrowid
             conn.execute('INSERT INTO reviews(submission_id,question_id) SELECT ?,id FROM questions WHERE task_id=?', (submission_id, assignment['task_id']))
         else:
             submission_id = submission['id']
@@ -553,8 +562,13 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
             if target:
                 target_id=target['id']
             else:
-                target_id=conn.execute('INSERT INTO submissions(task_id,student_code,created_at,updated_at,assignment_student_id) VALUES(?,?,?,?,?)',
-                    (assignment['task_id'],roster['student_code'],stamp(),stamp(),rid)).lastrowid
+                values = (assignment['task_id'],roster['student_code'],stamp(),stamp(),rid)
+                columns = 'task_id,student_code,created_at,updated_at,assignment_student_id'
+                if tenant_mode:
+                    columns += ',owner_id'
+                    values += (g.teacher_id,)
+                target_id=conn.execute(f'INSERT INTO submissions({columns}) VALUES({",".join("?" for _ in values)})',
+                                       values).lastrowid
                 conn.execute('INSERT INTO reviews(submission_id,question_id) SELECT ?,id FROM questions WHERE task_id=?',(target_id,assignment['task_id']))
             before=[dict(r) for r in conn.execute('SELECT * FROM reviews WHERE submission_id=?',(original['id'],))]
             new_details=dict(details,method='corrected',reason='教师撤回学号栏匹配并重新选择学生。' if details.get('method')=='band' else '教师撤回姓名推断并重新选择学生。',

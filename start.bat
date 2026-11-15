@@ -5,6 +5,7 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
+if not defined MOXIEBEN_TENANT_DIR if exist "%LOCALAPPDATA%\Moxieben\TenantData\dictation.sqlite3" set "MOXIEBEN_TENANT_DIR=%LOCALAPPDATA%\Moxieben\TenantData"
 echo 正在启动默写批改网站，请保持此窗口打开。
 echo 浏览器打开 http://127.0.0.1:5000
 ".venv\Scripts\python.exe" app.py
