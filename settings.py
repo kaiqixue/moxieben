@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import jsonify, request
+from flask import current_app, has_app_context, jsonify, request
 from PIL import Image
 from paddle_cloud import JOB_URL, MODEL
 
@@ -33,6 +33,8 @@ def migrate(database):
 
 
 def read_settings(db):
+    if has_app_context() and current_app.config.get('PRODUCTION_MODE'):
+        return dict(current_app.config['OCR_CONFIG'])
     with db() as conn:
         return {**DEFAULTS, **{r['key']: r['value'] for r in conn.execute('SELECT key,value FROM settings')}}
 
@@ -75,6 +77,9 @@ def _chat(config, raw, prompt, max_tokens=4000, *, timeout=90):
     endpoint = config['base_url'].rstrip('/')
     if not endpoint.endswith('/chat/completions'):
         endpoint += '/chat/completions'
+    if config.get('outbound_hosts'):
+        from production import validate_outbound_url
+        validate_outbound_url(endpoint, config['outbound_hosts'])
     payload = {'model': config['model'], 'messages': [{'role': 'user', 'content': [
         {'type': 'text', 'text': prompt},
         {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(raw).decode()}}
@@ -114,6 +119,11 @@ def test_openai_compatible(base_url, model, api_key):
 
 
 def visual_review_config():
+    if has_app_context() and current_app.config.get('PRODUCTION_MODE'):
+        config = current_app.config.get('VISUAL_REVIEW_CONFIG')
+        if not config:
+            raise ValueError('视觉复读服务尚未配置。')
+        return dict(config)
     config = {key: os.environ.get('VLM_REVIEW_' + key.upper(), '').strip()
               for key in ('base_url', 'model', 'api_key')}
     if not all(config.values()):

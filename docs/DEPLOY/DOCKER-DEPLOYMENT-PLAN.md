@@ -1,5 +1,7 @@
 # Docker Compose 部署计划
 
+> 更新：DEPLOY-IMPLEMENT-01 已新增 Dockerfile、docker-compose.yml、Caddyfile、wsgi.py 和配置/备份工具。下文保留原设计蓝图，不能据此认定全部完成；当前执行步骤见 [操作手册](SERVER-OPERATIONS.md)，实际验证和阻塞项见 [验收报告](DEPLOY-IMPLEMENT-01-REPORT.md)。
+
 以下是后续实施蓝图。必须先完成权限清单中的 P0 项并在隔离环境验收。当前 `create_app()` 直接启动仍会加载本地默认配置，并拒绝公开域名。
 
 ## 镜像与服务

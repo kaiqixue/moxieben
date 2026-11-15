@@ -23,6 +23,7 @@ secrets/
 *.jpg
 *.jpeg
 *.png
+!/static/images/teacher-desk.png
 *.zip
 /tests/fixtures/
 /docs/*

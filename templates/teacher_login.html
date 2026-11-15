@@ -66,7 +66,7 @@
         {% if account_form %}<div class="password-field">{% endif %}<input type="password" id="teacher-password" name="password" maxlength="128" autocomplete="current-password" required>{% if account_form %}<button type="button" class="password-toggle" aria-controls="teacher-password" aria-label="显示密码" aria-pressed="false">显示</button></div>{% endif %}
         <button type="submit" class="btn primary">登录教师工作台</button>
       </form>
-      {% if preview %}<p class="login-alternate"><a href="{{ url_for('teacher_register') }}">注册教师账号</a></p>{% endif %}
+      {% if preview and registration_open %}<p class="login-alternate"><a href="{{ url_for('teacher_register') }}">注册教师账号</a></p>{% endif %}
     {% else %}
       <p class="login-setup">请先在本机创建老师账号，再刷新页面登录。</p>
     {% endif %}

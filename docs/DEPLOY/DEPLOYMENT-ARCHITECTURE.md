@@ -1,5 +1,7 @@
 # 部署架构与环境划分
 
+> 本轮目标覆盖 Ubuntu 22.04 LTS（宿主）与 Python 3.11 Debian 容器；旧方案 24.04 是原建议，不是本轮强制迁移要求。当前 Caddy 转发全部同源请求，无独立前端构建。执行文件和边界见 [服务器操作手册](SERVER-OPERATIONS.md)。
+
 首期采用 Ubuntu Server 24.04 LTS、Docker Compose、Caddy、单个 Flask/Gunicorn 应用进程、SQLite 本地持久化及云端 Paddle OCR。HTTPS 入口与应用容器分离，浏览器始终使用同一域名。[Ubuntu LTS 版本](https://ubuntu.com/project/docs/release-team/list-of-releases/) · [Flask 生产部署](https://flask.palletsprojects.com/en/stable/deploying/)
 
 ```mermaid

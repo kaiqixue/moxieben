@@ -105,6 +105,9 @@ def recognize(path, config, *, db=None):
     model = config.get('paddle_model', MODEL)
     if not token:
         raise ValueError('请先在识别设置中填写 PaddleOCR Token。')
+    if config.get('outbound_hosts'):
+        from production import validate_outbound_url
+        validate_outbound_url(endpoint, config['outbound_hosts'])
     with Image.open(path) as image:
         width, height = image.size
     started = time.monotonic()
@@ -157,6 +160,9 @@ def recognize(path, config, *, db=None):
                 address = urlsplit(result_url)
                 if address.scheme != 'https' or not address.hostname or address.username or address.password:
                     raise ValueError('PaddleOCR 返回的结果下载地址无效。')
+                if config.get('result_hosts'):
+                    from production import validate_outbound_url
+                    validate_outbound_url(result_url, config['result_hosts'])
                 # A pre-signed object-store URL must never receive the teacher's API Token.
                 result_response = requests.get(result_url, timeout=(10, 30), allow_redirects=False, stream=True)
                 try:
