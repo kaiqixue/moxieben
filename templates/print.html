@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% if mode == 'answer_card' %}独立答题卡{% elif mode == 'sheet' %}默写答题纸{% elif mode == 'report' %}默写批改报告{% else %}提示{% endif %}</title>
+<style>
+*{box-sizing:border-box}body{font:15px/1.65 "Microsoft YaHei",sans-serif;color:#17243b;background:#f2f5f9;margin:0}main{max-width:850px;margin:28px auto;background:white;padding:44px}h1{font-size:25px;margin:0 0 12px}h2{font-size:18px}.muted{color:#58657a}.tools{display:flex;flex-wrap:wrap;align-items:center;gap:16px;padding:16px 0}.tools>a{display:inline-flex;align-items:center;min-height:44px}button{font:inherit;border:0;border-radius:7px;background:#2463eb;color:white;padding:9px 18px;cursor:pointer}a{color:#245ad0}.question{break-inside:avoid;margin:20px 0}.line{height:34px;border-bottom:1px solid #b5c0d0}.number{font-weight:bold}.answer{padding:6px 10px;background:#f1f5fb;white-space:pre-wrap;overflow-wrap:anywhere}.bad{color:#b42335;background:#fff0f0}.missing{color:#8b4b00;background:#fff2d5}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{text-align:left;border-bottom:1px solid #dce2eb;padding:8px}img{width:100%;display:block}.photo{position:relative;line-height:0}.region{position:absolute;border:2px solid #d32f4d;background:#ff335516;pointer-events:none}.report-question{border-bottom:1px solid #dce2eb;padding:16px 0;break-inside:avoid}.badge{font-weight:bold}.diff{white-space:pre-wrap}.hint{font-size:13px;color:#58657a}@page{size:A4;margin:16mm}@media print{body{background:white}main{margin:0;padding:0;max-width:none}.tools{display:none}.photo-block{break-before:page}.answer{background:#f7f7f7}a{color:inherit;text-decoration:none}}
+.answer-card-page{break-after:page;min-height:250mm}.answer-card-page:last-child{break-after:auto}.card-identity{display:flex;flex-wrap:wrap;gap:6mm;font-size:16px}.card-instructions{font-size:13px;margin:6mm 0}.card-answer{display:flex;gap:5mm;min-height:18mm;padding-top:4mm;break-inside:avoid}.card-answer strong{width:10mm;flex-shrink:0}.card-answer-lines{flex:1;min-width:0}.card-answer-line{height:14mm;border-bottom:1px solid #8d99a8}.card-page-number{text-align:right;font-size:13px}.card-title{overflow-wrap:anywhere}.card-identity-band{align-items:center;row-gap:3mm}.card-digits{display:inline-flex;align-items:center;white-space:nowrap}.digit-box{display:inline-block;width:9mm;height:11mm;border:1.2px solid #17243b;margin-left:-1.2px;vertical-align:middle}.card-digits .digit-box:first-of-type{margin-left:2mm}.card-prefix{font-size:18px;letter-spacing:1px}.card-format-code{font-family:Consolas,"Courier New",monospace;letter-spacing:.5px}@media screen and (max-width:600px){main{padding:20px;margin:0}.card-identity{gap:12px}.answer-card-page{min-height:0;padding-bottom:24px}}@media print{.card-title{font-size:21px;line-height:1.3}}
+</style></head><body><main>
+{% if mode == 'error' %}<h1>操作提示</h1><p>{{ error }}</p><a href="/">返回首页</a>
+{% elif mode == 'answer_card' %}
+<div class="tools"><button onclick="window.print()">打印答题卡</button><a class="download-button" href="{{ '/assignments/' ~ assignment_id if assignment_id else '/tasks/' ~ task.id }}/answer-card/download?format=pdf">下载 PDF</a><a class="download-button" href="{{ '/assignments/' ~ assignment_id if assignment_id else '/tasks/' ~ task.id }}/answer-card/download?format=docx">下载 Word</a><a href="{{ '/assignments/' ~ assignment_id if assignment_id else '/tasks/' ~ task.id }}">返回任务</a></div>
+{% for questions in card_pages %}<section class="answer-card-page">
+<h1 class="card-title">{{ task.name }} · 独立答题卡</h1>
+{% if card_format %}<div class="card-identity card-identity-band"><span>班级：{{ class_name or '________________' }}</span>{% if card_format.id_prefix %}<span>学号前缀：<b class="card-prefix">{{ card_format.id_prefix }}</b></span>{% endif %}<span class="card-digits">{{ card_label }}{% for _ in range(card_format.variable_count) %}<span class="digit-box"></span>{% endfor %}</span><span>姓名：____________</span></div>
+<p class="card-page-number"><span class="card-format-code">模板：{{ card_format.format_code }}</span> · 第 {{ loop.index }} / {{ card_pages|length }} 页</p>
+<p class="card-instructions">学号方格内每格只写一个阿拉伯数字{% if card_format.id_prefix %}，前缀已印好，只填后 {{ card_format.variable_count }} 位{% endif %}；请勿涂改模板编号。请按题号在横线上作答，每题只保留一份清楚的最终答案。需修改时，请划去旧答案，在本题空白处重写。每页均填写学号。</p>
+{% else %}<div class="card-identity"><span>班级：{{ class_name or '________________' }}</span><span>学号：________________</span><span>姓名：________________</span></div>
+<p class="card-page-number">第 {{ loop.index }} / {{ card_pages|length }} 页</p>
+<p class="card-instructions">请按题号在横线上作答，每题只保留一份清楚的最终答案。需修改时，请划去旧答案，在本题空白处重写。每页均填写学号和姓名。</p>{% endif %}
+{% for q in questions %}<div class="card-answer" data-card-question="{{ q.number }}"><strong>{{ q.number }}.</strong><div class="card-answer-lines">{% for _ in range(3 if q.kind == 'sentence' else 1) %}<div class="card-answer-line"></div>{% endfor %}</div></div>{% endfor %}
+</section>{% endfor %}
+{% elif mode == 'sheet' %}
+<div class="tools"><button onclick="window.print()">打印 / 保存 PDF</button><a href="/tasks/{{ task.id }}">返回任务</a></div>
+<h1>{{ task.name }} · 默写答题纸</h1><p>学生编号：________________　姓名：________________　日期：________________</p>
+<p class="hint">按老师要求作答，每道题在对应区域内书写。此纸不显示标准答案。</p>
+{% if task.passage %}<p class="hint">{{ task.instructions }}</p><div style="white-space:pre-wrap">{{ task.passage }}</div><h2>按题号填写答案</h2>{% endif %}
+{% for q in task.questions %}<div class="question"><span class="number">{{ q.number }}.</span>　<span class="muted">{{ {'word':'单词','phrase':'短语','sentence':'句子','grammar':'语法填空'}[q.kind] }} · {{ q.points }} 分</span>{% if q.hint %}　提示词：{{ q.hint }}{% endif %}
+{% for _ in range(3 if q.kind == 'sentence' else 1) %}<div class="line"></div>{% endfor %}</div>{% endfor %}
+{% else %}
+<div class="tools"><button onclick="window.print()">打印 / 保存 PDF</button><a href="/submissions/{{ submission.id }}">返回复核</a></div>
+<h1>{{ submission.task_name }} · 默写批改报告</h1>
+<p>学生编号：{{ submission.student_code }}　作业编号：{{ submission.id }}</p>
+{% if submission.identity %}<p>姓名：{{ submission.identity.name }}　班级：{{ submission.identity.class_name }}　学年 / 学期：{{ submission.identity.term }}</p>{% endif %}
+<h2>{{ '最终成绩' if submission.is_final else ('批改失败' if submission.grading_state == 'failed' else '暂定成绩') }}：{{ submission.score }} / {{ submission.total_points }}</h2>
+<p class="hint">批改来源：{{ submission.grading_source }}。机器批改 {{ submission.machine_graded_count }} 题，教师已复核 {{ submission.teacher_reviewed_count }}/{{ submission.question_count }} 题，不确定 {{ submission.uncertain_count }} 题。{{ submission.rules.description }} 规则版本：{{ submission.rules.version }}。</p>
+{% if submission.grading_error %}<p>{{ submission.grading_error }}</p>{% endif %}
+{% for r in submission.reviews %}<section class="report-question"><strong>第 {{ r.number }} 题 · {{ r.score }}/{{ r.points }} 分 · {{ '教师已复核' if r.confirmed else ('机器已批改 · 不确定' if r.uncertain else ('机器已批改' if r.graded else '未批改')) }}</strong>
+{% if r.context %}<p>题目上下文：{{ r.context }}</p>{% endif %}{% if r.hint %}<p>提示词：{{ r.hint }}</p>{% endif %}
+<p>标准答案：<span class="answer">{{ r.answer }}</span></p>
+{% if r.variants %}<p class="hint">可接受变体：{{ r.variants|join(' / ') }}</p>{% endif %}
+<p>原始机器转录：<span class="answer">{{ r.machine_text or '未关联识别文字' }}</span></p>
+<p>{{ '教师核对文字' if r.teacher_edited else '机器采用转录' }}：<span class="answer">{{ '已确认未作答' if r.confirmed_blank else (r.transcript or ('未补录作答文字，以教师原图判定为准' if r.teacher_decision else ('机器未取得有效作答' if r.auto_result else '未填写，不能据此认定未作答'))) }}</span></p>
+{% if r.auto_result %}<p class="hint">机器判分依据：{{ r.auto_result.reason }}</p>{% endif %}
+<p class="diff">差异：{% if r.teacher_decision %}教师已按原图判定；原始机器文字与分数判定分别保留。{% elif r.matched %}与可接受答案一致{% else %}{% for d in r.diff %}{% if d.op == 'equal' %}{{ d.actual }}{% elif d.op == 'delete' %}<span class="missing">【漏写：{{ d.expected }}】</span>{% elif d.op == 'insert' %}<span class="bad">【多写：{{ d.actual }}】</span>{% else %}<span class="bad">【{{ d.actual }} → {{ d.expected }}】</span>{% endif %}{% endfor %}{% endif %}</p>
+{% if r.score_override is not none %}<p>教师改分依据：{{ r.reason }}</p>{% endif %}</section>{% endfor %}
+{% for page in submission.pages %}<section class="photo-block"><h2>作业照片 {{ loop.index }} · 作答区域标注</h2><div class="photo"><img src="{{ page.url }}" alt="学生原始作业照片">
+{% for r in submission.reviews %}{% for region in r.regions if region.page_id == page.id %}<span class="region" style="left:{{ region.box[0]/page.width*100 }}%;top:{{ region.box[1]/page.height*100 }}%;width:{{ (region.box[2]-region.box[0])/page.width*100 }}%;height:{{ (region.box[3]-region.box[1])/page.height*100 }}%"></span>{% endfor %}{% endfor %}</div></section>{% endfor %}
+{% endif %}</main></body></html>

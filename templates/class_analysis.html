@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ report.assignment.task_name }} · {{ '全班错题讲评' if view == 'class' else '学生订正单' }}</title>
+{% if download %}<style>{{ shared_css|safe }}</style>{% else %}<link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">{% endif %}
+<style>
+.report-page main{max-width:1000px;margin:24px auto;padding:32px;background:white;width:100%;color:var(--ink);border-radius:var(--radius)}
+.report-page h1{font-size:25px;line-height:1.4;margin:0 0 12px;overflow-wrap:anywhere}
+.report-page h2{font-size:19px;margin:0 0 8px}
+.report-page h3{font-size:16px;margin:0}
+.report-page p{margin:8px 0}
+.report-page button,.report-page .button{display:inline-block;border:1px solid #c4d1e4;background:white;padding:8px 14px;text-decoration:none;cursor:pointer;border-color:var(--border);color:var(--ink);border-radius:8px;font-size:12px;font-weight:550;min-height:39px}
+.report-page .primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.report-page .tools,.report-page .tabs,.report-page .stats,.report-page .student-links{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.report-page .tools{margin:18px 0}
+.report-page .tabs{border-bottom:1px solid var(--border);padding:12px 0;margin:12px 0}
+.report-page .stats{padding:16px;background:var(--bg);border-radius:8px}
+.report-page .stats>span{min-width:100px}
+.report-page .stats strong{font-size:23px;display:block}
+.report-page .muted,.report-page .hint{color:#58657a}
+.report-page .hint{font-size:13px}
+.report-page .notice{padding:12px;border-left:3px solid #e2ad35;background:#fff8e9;margin:16px 0}
+.report-page .question,.report-page .correction-question{border:1px solid var(--border);border-radius:8px;padding:18px;margin:16px 0;overflow-wrap:anywhere}
+.report-page .question-title{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.report-page .rate{font-weight:bold;color:#a43820}
+.report-page .answer,.report-page .context,.report-page .actual{white-space:pre-wrap;overflow-wrap:anywhere}
+.report-page .answer{font-weight:bold}
+.report-page .context{background:var(--bg);padding:10px;font-size:14px}
+.report-page .student-links a{font-size:14px}
+.report-page .student-sheet{margin:28px 0 0}
+.report-page .identity{display:flex;gap:20px;flex-wrap:wrap}
+.report-page .line{height:10mm;border-bottom:1px solid #a7b4c7}
+.report-page .student-picker{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+.report-page select{max-width:100%;padding:8px}
+.report-page .empty{padding:24px;background:var(--bg);border-radius:8px}
+.report-page .generated{border-top:1px solid var(--border);margin-top:24px;padding-top:12px;font-size:12px;color:#58657a}
+.report-page .pending-links{margin:8px 0}
+.report-page .screen-only{display:block}
+.report-page .common-answer[aria-pressed="true"]{background:var(--ink);color:white;border-color:var(--ink)}
+.report-page .common-answer{display:inline-block;background:var(--blue-light);padding:4px 8px;margin:4px;border-radius:4px;max-width:100%;overflow-wrap:anywhere;white-space:pre-wrap;cursor:pointer;min-height:44px;text-align:left}
+.report-page .common-answer:focus-visible,.report-page [data-answer-more]:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+.report-page [hidden]{display:none!important}
+.report-page .answer-filters{margin:12px 0}
+.report-page .answer-count{margin:8px 0;font-size:13px;color:#58657a}
+.report-page [data-answer-more]{margin:4px;font-size:13px}
+.report-page .muted,.report-page .hint,.report-page .answer-count,.report-page .generated{color:var(--muted)}
+@page{size:A4;margin:16mm}
+@media print{
+.report-page{background:white;font-size:12px}
+.report-page main{margin:0;padding:0;max-width:none;border-radius:0}
+.report-page .tools,.report-page .tabs,.report-page .student-picker,.report-page .screen-only{display:none!important}
+.report-page .question{break-inside:avoid}
+.report-page .correction-question{break-inside:avoid;padding:12px;margin:12px 0}
+.report-page .student-sheet{break-before:page;margin:0}
+.report-page .student-sheet:first-of-type{break-before:auto}
+.report-page .student-links a{color:inherit;text-decoration:none}
+.report-page .stats strong{font-size:19px}
+.report-page .line{height:10mm}
+.report-page h1{font-size:21px}
+.report-page .generated{font-size:10px}
+.report-page .students-view>.report-heading{display:none}
+.report-page .students-view>.report-notes{display:none}
+.report-page .extra-answer{display:inline-block!important}
+.report-page .student-links a[hidden]{display:inline!important}
+.report-page [data-answer-more],.report-page [data-answer-filter="all"],.report-page .answer-count{display:none!important}
+.report-page .common-answer,.report-page .common-answer[aria-pressed="true"]{background:var(--blue-light);color:var(--ink);border:0;min-height:0;padding:4px 8px}
+}
+@media(max-width:680px){
+.report-page main{margin:0;padding:18px;border-radius:0}
+.report-page h1{font-size:22px}
+.report-page .question,.report-page .correction-question{padding:14px}
+.report-page .stats{gap:12px}
+.report-page .stats>span{min-width:85px}
+.report-page .tools>*{min-height:44px}
+.report-page .student-picker{align-items:stretch;flex-direction:column}
+.report-page .student-picker .button{align-self:flex-start}
+.report-page .identity{gap:10px}
+}
+</style></head><body class="report-page"><main class="{{ 'students-view' if view == 'students' else '' }}">
+{% set aid=report.assignment.id %}{% set counts=report.counts %}
+{% macro actual(item) -%}
+{% if item.answer_status == 'blank' %}教师已确认未作答{% elif item.answer_status == 'teacher_verdict' %}教师原图判错，未补录作答文字{% elif item.answer_status == 'missing' %}未取得作答文字（不代表未作答）{% else %}{{ item.transcript if item.transcript is defined else item.text }}{% endif %}
+{%- endmacro %}
+<div class="report-heading"><h1>{{ report.assignment.task_name }} · {{ '全班错题讲评' if view == 'class' else '学生订正单' }}</h1>
+<p>{{ report.assignment.class_name }}{% if report.assignment.term %} · {{ report.assignment.term }}{% endif %}</p></div>
+<nav class="tabs" aria-label="讲评视图"><a class="button {{ 'primary' if view == 'class' else '' }}" href="{{ base }}/assignments/{{ aid }}/analysis" {{ 'aria-current=page' if view == 'class' else '' }}>全班讲评</a><a class="button {{ 'primary' if view == 'students' else '' }}" href="{{ base }}/assignments/{{ aid }}/analysis?view=students" {{ 'aria-current=page' if view == 'students' else '' }}>按学生订正</a><a href="{{ base }}/assignments/{{ aid }}">返回班级成绩</a></nav>
+<div class="tools"><button class="primary" onclick="window.print()">{{ '打印讲评报告' if view == 'class' else '打印订正单' }}</button><a class="button" id="analysis-download" href="{{ base }}/assignments/{{ aid }}/analysis/download?view={{ view }}{% if selected %}&amp;student={{ selected }}{% endif %}">{{ '下载讲评报告' if view == 'class' else '下载订正单' }}（HTML）</a><span class="hint">下载后可离线打开打印；浏览器打印时也可保存为 PDF。</span></div>
+{% if not download or view == 'class' %}<div class="report-notes"><div class="stats"><span><strong>{{ counts.final }} / {{ counts.expected }}</strong>已计分 / 应交人数</span><span><strong>{{ counts.wrong_students }}</strong>有明确错题的学生</span><span><strong>{{ counts.wrong_answers }}</strong>明确错题（人次）</span><span><strong>{{ counts.pending_questions }}</strong>待核对题（人次）</span></div>
+<p class="hint">错题率 = 明确错误人数 ÷ 本题有效计分人数。不确定题不混入错题，也不进入分母。机器结果可按需抽查，教师改判以当前保存结果为准。</p>
+{% if counts.not_uploaded or counts.failed or counts.processing or counts.ungraded or counts.exempt or counts.identity_photos %}<p class="notice">本次未计入题目统计：未交 {{ counts.not_uploaded }} 人，批改失败 {{ counts.failed }} 人，处理中 {{ counts.processing }} 人，待批改 {{ counts.ungraded }} 人，免交 {{ counts.exempt }} 人。另有 {{ counts.identity_photos }} 张照片待确认学生。<a href="{{ base }}/assignments/{{ aid }}?view=attention">返回处理</a></p>{% endif %}</div>{% endif %}
+{% if view == 'class' %}
+<h2 style="margin-top:24px">优先讲评的题目</h2>
+{% if not counts.final %}<p class="empty">暂无可统计的最终成绩。未交或处理失败不等于学生答错。</p>{% endif %}
+{% for q in report.questions %}<section class="question" data-analysis-question="{{ q.number }}">
+<div class="question-title"><h3>第 {{ q.number }} 题 · {{ {'word':'单词','phrase':'短语','sentence':'句子','grammar':'语法填空'}[q.kind] }}</h3><span class="rate">{% if q.valid_count %}{{ q.wrong_count }} / {{ q.valid_count }} 人答错 · {{ q.wrong_rate|round(1) }}%{% else %}暂无有效计分样本{% endif %}</span></div>
+<p>参考答案：<span class="answer">{{ q.answer }}</span>{% if q.variants %}<span class="hint">（可接受：{{ q.variants|join(' / ') }}）</span>{% endif %}</p>
+{% if q.context %}<p class="context">{{ q.context }}</p>{% endif %}
+{% if q.common_answers %}<div class="answer-filters" role="group" aria-label="第{{ q.number }}题按常见作答筛选学生"><span>常见作答：</span><button type="button" class="common-answer" data-answer-filter="all" aria-pressed="true" aria-controls="answer-students-{{ q.id }}">全部 · {{ q.wrong_count }} 人</button>{% for group in q.common_answers %}<button type="button" class="common-answer{{ ' extra-answer' if loop.index > 5 else '' }}" data-answer-filter="{{ group.id }}" aria-pressed="false" aria-controls="answer-students-{{ q.id }}" {{ 'hidden' if loop.index > 5 else '' }}>{{ actual(group) }} · {{ group.count }} 人</button>{% endfor %}{% if q.common_answers|length > 5 %}<button type="button" data-answer-more data-extra-count="{{ q.common_answers|length - 5 }}" aria-expanded="false">另有 {{ q.common_answers|length - 5 }} 种 · 展开</button>{% endif %}</div>{% endif %}
+{% if q.mistakes %}<p class="answer-count" data-answer-count role="status" aria-live="polite" aria-atomic="true">全部答错学生：{{ q.wrong_count }} 人</p><div id="answer-students-{{ q.id }}" class="student-links" aria-label="第{{ q.number }}题待订正学生">{% for m in q.mistakes %}<a data-answer-group="{{ m.answer_group }}" href="{{ base }}/submissions/{{ m.submission_id }}?question={{ m.question_id }}">{{ m.student_code }} {{ m.student_name }}</a>{% endfor %}</div>{% elif q.valid_count %}<p class="muted">本题未发现明确错题。</p>{% endif %}
+{% if q.pending_count %}<p class="notice">另有 {{ q.pending_count }} 人本题待核对，暂不算入明确错题率。{% for s in report.students %}{% for pending in s.pending if pending.question_id == q.id %}<a href="{{ base }}/submissions/{{ s.submission_id }}?question={{ q.id }}&amp;filter=uncertain">{{ s.student_code }} {{ s.name }} · 核对原图</a> {% endfor %}{% endfor %}</p>{% endif %}
+</section>{% endfor %}
+{% else %}
+{% if not download %}<form class="student-picker" method="get" action="{{ base }}/assignments/{{ aid }}/analysis"><input type="hidden" name="view" value="students"><label for="analysis-student">选择学生</label><select name="student" id="analysis-student"><option value="">全部需要订正 / 核对的学生</option>{% for s in report.students %}<option value="{{ s.id }}" {{ 'selected' if selected == s.id|string else '' }}>{{ s.student_code }} {{ s.name }} · {{ s.errors|length }} 道明确错题{% if s.pending %}，{{ s.pending|length }} 道待核对{% endif %}</option>{% endfor %}</select><button class="button" type="submit">查看订正单</button></form>{% endif %}
+{% if not selected_students %}<p class="empty">暂无明确错题或待核对题，无需生成学生订正单。未计分答卷请先返回班级处理。</p>{% endif %}
+{% for s in selected_students %}<section class="student-sheet" data-correction-student="{{ s.id }}">
+<h2>{{ report.assignment.task_name }} · 订正单</h2><div class="identity"><strong>{{ report.assignment.class_name }}</strong><span>学号：{{ s.student_code }}</span><strong>姓名：{{ s.name }}</strong><span>日期：____________</span></div><p class="hint">明确错题 {{ s.errors|length }} 道；请对照参考答案，在横线上重新书写。</p>
+{% for q in s.errors %}<article class="correction-question" data-correction-question="{{ q.number }}"><h3>第 {{ q.number }} 题</h3>{% if q.context %}<p class="context">{{ q.context }}</p>{% endif %}<p class="actual">本次作答：{{ actual(q) }} <span class="hint">（{{ q.source }}，{{ q.score }} / {{ q.points }} 分）</span></p><p>参考答案：<span class="answer">{{ q.answer }}</span>{% if q.variants %}（可接受：{{ q.variants|join(' / ') }}）{% endif %}</p>{% for _ in range(3 if q.kind == 'sentence' else 2) %}<div class="line" aria-hidden="true"></div>{% endfor %}</article>{% endfor %}
+{% if not s.errors %}<p class="empty">该学生暂无明确错题。{% if s.state not in ['completed','uncertain'] %}当前答卷未计分或不能参与统计，请先返回班级查看状态。{% endif %}</p>{% endif %}
+{% if s.pending %}<div class="notice"><strong>以下题目由老师先核对，不作为已确定错题：</strong>{% for q in s.pending %}<p class="pending-links">第 {{ q.number }} 题：{{ q.reason }} <a href="{{ base }}/submissions/{{ s.submission_id }}?question={{ q.question_id }}&amp;filter=uncertain">核对原图</a></p>{% endfor %}</div>{% endif %}
+</section>{% endfor %}
+{% endif %}
+<p class="generated">生成时间：{{ report.generated_at }}{% if download %} · 离线快照，后续改判请回网站重新下载。{% else %} · 改判保存后刷新本页，统计和订正内容随之更新。{% endif %}</p>
+</main>{% if view == 'class' %}<script data-answer-drilldown>
+function filterAnswer(card,button) {
+  const selected=button.dataset.answerFilter;
+  card.querySelectorAll('[data-answer-filter]').forEach(item=>item.setAttribute('aria-pressed',String(item===button)));
+  let count=0;
+  card.querySelectorAll('[data-answer-group]').forEach(link=>{link.hidden=selected!=='all'&&link.dataset.answerGroup!==selected;if(!link.hidden)count++});
+  card.querySelector('[data-answer-count]').textContent=(selected==='all'?'全部答错学生':'提交此作答的学生')+'：'+count+' 人';
+}
+document.addEventListener('click',event=>{
+  const button=event.target.closest('[data-answer-filter],[data-answer-more]');if(!button)return;
+  const card=button.closest('[data-analysis-question]');
+  if(button.hasAttribute('data-answer-filter')){filterAnswer(card,button);return}
+  const expand=button.getAttribute('aria-expanded')!=='true';
+  card.querySelectorAll('.extra-answer').forEach(item=>item.hidden=!expand);
+  button.setAttribute('aria-expanded',String(expand));button.textContent=expand?'收起':'另有 '+button.dataset.extraCount+' 种 · 展开';
+  if(!expand&&card.querySelector('.extra-answer[aria-pressed="true"]'))filterAnswer(card,card.querySelector('[data-answer-filter="all"]'));
+});
+</script>{% endif %}</body></html>

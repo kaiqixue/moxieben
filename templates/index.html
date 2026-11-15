@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="theme-color" content="#FAF9F7">
+  <title>默写本 · 英语默写批改</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='theme.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="{{ url_for('static', filename='navigation.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='workbench.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='workspace.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='analysis.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='classes.js') }}" defer></script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <aside class="sidebar">
+    <a class="brand" href="/" data-nav><span class="brand-icon" aria-hidden="true">M<span>✓</span></span><span>默写本<small>ENGLISH DICTATION</small></span></a>
+    <div class="workspace-label">教师工作台</div>
+    <nav aria-label="主要导航">
+      <a class="nav-item active" href="/" data-nav>工作台</a>
+      <a class="nav-item" href="/assignments" data-nav>作业管理</a>
+      <a class="nav-item" href="/classes" data-nav>班级与学生</a>
+      <details class="nav-more"><summary class="nav-item">更多</summary><div class="nav-menu">
+        <a class="nav-item" href="/settings" data-nav>识别设置</a>
+        <button class="nav-item" id="guide-button">操作指南</button>
+      </div></details>
+    </nav>
+    <div class="sidebar-note"><span class="privacy-dot"></span> 本地工作空间<p>记录保存在本机；云端模式会发送照片到配置服务。<br>自动出成绩，老师可核对改判。</p></div>
+    <div class="sidebar-footer">让批改更轻松，让反馈更清晰。</div>
+  </aside>
+  <div class="app-shell">
+    <header class="topbar"><div class="breadcrumb" id="breadcrumb">工作台 / 默写批改</div><div class="local-badge"><span class="privacy-dot"></span> 本地运行 <span class="avatar" aria-label="教师">师</span></div></header>
+    <main id="main" tabindex="-1"><div class="loading" role="status" aria-live="polite"><p>正在打开工作台…</p><div class="skeleton" aria-hidden="true"><span class="skeleton-line skeleton-title"></span><span class="skeleton-line"></span><span class="skeleton-line"></span><span class="skeleton-line"></span></div></div></main>
+    <footer class="page-footer">默写本 · 每一份认真，都值得被看见</footer>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="review-undo" class="review-undo" role="status" aria-live="polite" hidden></div>
+  <dialog id="guide-dialog" aria-labelledby="guide-title"><div class="dialog-header"><h2 id="guide-title">开始一次默写批改</h2><button class="icon-button" id="close-guide" aria-label="关闭操作指南">×</button></div><ol class="guide-steps"><li><strong>建立班级与名单</strong><p>在“班级与学生”中新建班级，粘贴编号和姓名，预览后确认导入。</p></li><li><strong>建立任务并按班布置</strong><p>输入标准答案、可接受写法和分值，在任务中选择班级，保存本次应交名单。</p></li><li><strong>上传学生照片</strong><p>可单张或批量上传 JPG、PNG；唯一身份自动关联，重名或冲突时手动确认。</p></li><li><strong>自动识别与批改</strong><p>关联成功后自动识别作答、判分并生成最终成绩；历史答卷点击“开始自动批改”。</p></li><li><strong>按需复核与改判</strong><p>先查看成绩和错题、不确定题；点击题目核对原图并修改。保存修改会立即更新最终成绩。</p></li></ol><p class="notice">评分区分大小写和标点，连续空白会合并。请在标准答案中添加可接受写法。OCR 可能识别错误，结果须人工核对。</p></dialog>
+</body>
+</html>

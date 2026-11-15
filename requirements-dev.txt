@@ -1,0 +1,3 @@
+-r requirements.txt
+# Parse generated PDFs in export regressions; not needed by the running website.
+pypdf==6.21.4
