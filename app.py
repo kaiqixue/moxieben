@@ -368,25 +368,42 @@ def create_app(config=None):
         rule = request.url_rule.rule
         args = request.view_args or {}
         sources = {
-            '/api/assignments/': ('SELECT id FROM assignments WHERE id=?', 'aid'),
-            '/api/assignment-students/': ('SELECT assignment_id FROM assignment_students WHERE id=?', 'rid'),
+            '/api/assignments/': ('SELECT id FROM assignments WHERE id=?', 'aid', 'assignments'),
+            '/api/assignment-students/': ('SELECT assignment_id FROM assignment_students WHERE id=?', 'rid', 'assignment_students'),
             '/api/submissions/': ('''SELECT a.assignment_id FROM submissions s
-                JOIN assignment_students a ON a.id=s.assignment_student_id WHERE s.id=?''', 'sid'),
+                JOIN assignment_students a ON a.id=s.assignment_student_id WHERE s.id=?''', 'sid', 'submissions'),
             '/api/pages/': ('''SELECT a.assignment_id FROM pages p JOIN submissions s ON s.id=p.submission_id
-                JOIN assignment_students a ON a.id=s.assignment_student_id WHERE p.id=?''', 'pid'),
-            '/api/batch-photos/': ('SELECT assignment_id FROM batch_photos WHERE id=?', 'pid'),
+                JOIN assignment_students a ON a.id=s.assignment_student_id WHERE p.id=?''', 'pid', 'pages'),
+            '/api/batch-photos/': ('SELECT assignment_id FROM batch_photos WHERE id=?', 'pid', 'batch_photos'),
             '/api/grading-jobs/': ('''SELECT assignment_id FROM grading_jobs WHERE id=?
                 UNION SELECT a.assignment_id FROM grading_jobs j JOIN submissions s ON
                 (s.id=j.submission_id OR EXISTS(SELECT 1 FROM json_each(j.grade_ids) WHERE value=s.id))
                 JOIN assignment_students a ON a.id=s.assignment_student_id WHERE j.id=?
                 UNION SELECT p.assignment_id FROM grading_jobs j JOIN json_each(j.photo_ids) ids
-                JOIN batch_photos p ON p.id=ids.value WHERE j.id=?''', 'jid'),
+                JOIN batch_photos p ON p.id=ids.value WHERE j.id=?''', 'jid', 'grading_jobs'),
         }
         source = next((value for prefix, value in sources.items() if rule.startswith(prefix)), None)
         deleting_task = request.method == 'DELETE' and request.endpoint == 'delete_task'
         updating_class = request.endpoint == 'update_class'
         if source is None and not deleting_task and not updating_class:
             return
+        target_rid = None
+        if request.endpoint in ('link_submission', 'confirm_batch_photo', 'reassign_photo'):
+            payload = request.get_json(silent=True)
+            rid = payload.get('assignment_student_id') if isinstance(payload, dict) else None
+            if type(rid) is int and rid > 0:
+                target_rid = rid
+        # Reject foreign/missing resources before resolving archive state or taking locks.
+        if tenant_mode:
+            with db() as conn:
+                if source:
+                    row(conn, source[2], args[source[1]])
+                elif deleting_task:
+                    row(conn, 'tasks', args['tid'])
+                else:
+                    row(conn, 'classes', args['cid'])
+                if target_rid is not None:
+                    row(conn, 'assignment_students', target_rid)
         g.archive_write_locks = []
         # Identity can change from anonymous to linked; lock the stable answer before resolving its class.
         sid = args.get('sid') if rule.startswith('/api/submissions/') else None
@@ -402,18 +419,18 @@ def create_app(config=None):
             conn.execute('BEGIN')
             aids = set()
             if source:
-                query, key = source
+                query, key, _ = source
                 aids.update(r[0] for r in conn.execute(query, (args[key],) * query.count('?')) if r[0])
             if deleting_task:
                 aids.update(r[0] for r in conn.execute('SELECT id FROM assignments WHERE task_id=?', (args['tid'],)))
-            if request.endpoint in ('link_submission', 'confirm_batch_photo', 'reassign_photo'):
-                payload = request.get_json(silent=True)
-                rid = payload.get('assignment_student_id') if isinstance(payload, dict) else None
-                if type(rid) is int and rid > 0:
-                    aids.update(r[0] for r in conn.execute('SELECT assignment_id FROM assignment_students WHERE id=?', (rid,)))
-            cids = {r[0] for r in conn.execute(f"SELECT class_id FROM assignments WHERE id IN ({','.join('?' for _ in aids)})", list(aids))} if aids else set()
+            if target_rid is not None:
+                aids.update(r[0] for r in conn.execute('SELECT assignment_id FROM assignment_students WHERE id=?', (target_rid,)))
+            cids = {row(conn, 'assignments', aid)['class_id'] for aid in aids}
             if updating_class:
                 cids.add(args['cid'])
+            if tenant_mode:
+                for cid in cids:
+                    row(conn, 'classes', cid)
         # ponytail: per-class locks cover this local process; multiple server processes need database write guards.
         for cid in sorted(cids):
             lock = CLASS_WRITE_LOCKS.setdefault((str(database.resolve()), cid), threading.RLock())
