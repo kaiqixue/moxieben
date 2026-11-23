@@ -21,6 +21,13 @@ class TenantIsolationTests(unittest.TestCase):
         self.register(self.a, 'teacher-a@example.test')
         self.register(self.b, 'teacher-b@example.test')
 
+    def test_login_session_survives_local_restart(self):
+        cookie = self.a.get_cookie(self.app.config['SESSION_COOKIE_NAME'])
+        restarted = create_app({'DATA_DIR': self.data_dir, 'TESTING': True, 'TEACHER_TENANT_MODE': True})
+        browser = restarted.test_client()
+        browser.set_cookie(cookie.key, cookie.value)
+        self.assertEqual(browser.get('/api/classes').status_code, 200)
+
     def token(self, client):
         html = client.get('/').get_data(as_text=True)
         return re.search(r'name="csrf-token" content="([^"]+)"', html).group(1)

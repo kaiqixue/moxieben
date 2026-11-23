@@ -106,6 +106,19 @@ def create_app(config=None):
     if (account_preview or tenant_mode) and data_dir.resolve().is_relative_to((ROOT / 'data').resolve()):
         raise ValueError('多账号模式需要独立数据目录，不能使用现有 data 目录。')
     data_dir.mkdir(parents=True, exist_ok=True)
+    if (account_preview or tenant_mode) and not app.secret_key:
+        key_file = data_dir / '.session-key'
+        try:
+            descriptor = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, 'w', encoding='ascii') as handle:
+                handle.write(secrets.token_hex(32))
+        local_key = key_file.read_text(encoding='ascii')
+        if not re.fullmatch(r'[0-9a-f]{64}', local_key):
+            raise ValueError('本地登录密钥无效，请先检查数据目录。')
+        app.secret_key = local_key
     database = data_dir / ('accounts.sqlite3' if account_preview else 'dictation.sqlite3')
     if tenant_mode and database.exists():
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as existing:
@@ -353,7 +366,7 @@ def create_app(config=None):
                        'suggestions', 'extract_answers', 'acknowledge_page', 'report', 'history',
                        'get_grading_job', 'latest_grading_job', 'start_grading_job', 'process_photo',
                        'submission_job', 'start_submission_job', 'resume_grading_job', 'auto_grade', 'start_ai_review_job',
-                       'run_ocr', 'visual_reread', 'visual_suggestion_image',
+                       'run_ocr', 'visual_reread', 'visual_reread_page', 'visual_suggestion_image',
                        'deletion_preview', 'delete_task',
                        'class_analysis_json', 'class_analysis_page', 'memories', 'candidates',
                        'import_memory', 'update_memory'}
@@ -1003,16 +1016,19 @@ def create_app(config=None):
                 # Optional cached models may be absent on a container; never fall back to a paid OCR call.
                 app.logger.warning('Offline review localization unavailable for submission %s',sid)
                 localization_unavailable = True
+        page_fallback = False
+        metrics = dict(requests=0, valid=0, suggestions=0)
         for question in detail['reviews']:
             if not question['uncertain']:
                 continue
             reasons = []
             crop = automatic_visual_crop(detail, question, reasons)
             if not crop:
-                skip(reasons[0] + ('（本机精确定位暂不可用）' if localization_unavailable else ''))
+                page_fallback = True
                 continue
             if (question['question_id'], crop['page_id']) in attempted:
                 skip('本题已尝试自动复核')
+                page_fallback = True
                 continue
             if used >= budget:
                 skip('达到本次调用上限')
@@ -1023,14 +1039,141 @@ def create_app(config=None):
                 environ={'moxieben.automatic_visual': True, 'moxieben.ai_review_job': job_id,
                          'moxieben.ai_localization': localization})
             used += 1
+            metrics['requests'] += 1
+            metrics['valid'] += int(response.status_code == 200)
+            metrics['suggestions'] += int(response.status_code == 200 and response.json.get('status') == 'readable')
             if response.status_code == 200 and response.json.get('applied'):
                 resolved += 1
             else:
-                skip('接口未取得有效结果' if response.status_code == 502 else
+                skip('接口失败：' + response.json.get('error_code','provider') if response.status_code == 502 else
                      '两次识别未能相互印证' if response.status_code == 200 else '答卷状态变化或不符合复核条件')
-        return used, resolved, skipped
+        if page_fallback and used < budget:
+            for page in detail['pages']:
+                if page['status'] != 'done' or used >= budget:
+                    continue
+                response = teacher_auth.internal_post(app, f'/api/submissions/{sid}/visual-reread-page',
+                    {'page_id':page['id']}, owner_id=g.teacher_id if tenant_mode else None,
+                    environ={'moxieben.ai_review_job':job_id,'moxieben.ai_budget':budget-used})
+                result = response.json or {}
+                used += result.get('considered', 0)
+                for key in metrics:
+                    metrics[key] += result.get(key, 0)
+                if result.get('error_code'):
+                    skip('整页接口失败：' + result['error_code'])
+                elif result.get('suggestions'):
+                    skipped['整页复读建议待教师采纳'] = skipped.get('整页复读建议待教师采纳',0) + result['suggestions']
+                elif result.get('requests'):
+                    skip('整页结果仍需人工核对')
+                elif result.get('reason'):
+                    skip(result['reason'])
+        return used, resolved, skipped, metrics
 
     app.extensions['automatic_ai_review'] = automatic_ai_review
+
+    @app.post('/api/submissions/<int:sid>/visual-reread-page')
+    def visual_reread_page(sid):
+        from settings import reread_page, VisualReviewError
+        payload = body()
+        if set(payload) != {'page_id'}:
+            fail('整页复读只接受照片编号。')
+        pid = integer(payload['page_id'], '照片编号')
+        automatic = request.environ.get('moxieben.ai_review_job')
+        config = app.extensions['read_ai_review']()
+        if not config['enabled']:
+            fail('请先启用并配置 AI 复核。', 409)
+
+        def current(conn):
+            if not app.extensions['read_ai_review']()['enabled']:
+                fail('AI 复核已关闭。', 409)
+            detail = submission_detail(conn, sid)
+            page = next((p for p in detail['pages'] if p['id'] == pid), None)
+            if page is None:
+                fail('照片不属于当前答卷。', 404)
+            active = detail.get('processing_job') or {}
+            if ((detail.get('identity') or {}).get('class_archived')
+                    or (detail.get('identity') or {}).get('exempt')
+                    or detail['grading_state'] != 'final' or page['status'] != 'done'
+                    or any(p['status'] == 'running' for p in detail['pages'])
+                    or (active.get('state') in ('queued','running','interrupted') and active.get('id') != automatic)):
+                fail('答卷当前状态不允许复读。', 409)
+            if automatic:
+                job = row(conn, 'grading_jobs', automatic)
+                if job['state'] != 'running' or job['stage'] != 'ai_review' or sid not in json.loads(job['grade_ids']):
+                    fail('复核任务已变化。', 409)
+            return detail, page
+
+        with db() as conn:
+            detail, page = current(conn)
+            revisions = review_page_revision(conn, sid)
+            image_name = row(conn, 'pages', pid)['image']
+        from answer_extraction import number_occurrences
+        candidates = []
+        for q in detail['reviews']:
+            if not q['uncertain'] or q['teacher_edited'] or q['confirmed'] or q['kind'] not in ('word','phrase','grammar'):
+                continue
+            previous = detail.get('visual_suggestions', {}).get(q['question_id'])
+            if previous and (automatic or previous['status'] == 'readable'):
+                continue
+            regions = (q['auto_result'] or {}).get('regions') or q['regions']
+            owners = {r['page_id'] for r in regions}
+            if not owners:
+                owners = {p['id'] for p in detail['pages'] if q['number'] in number_occurrences(p)}
+            if len(detail['pages']) == 1:
+                owners = {pid}
+            if owners != {pid}:
+                continue
+            candidates.append(q)
+        limit = request.environ.get('moxieben.ai_budget', config['limit'])
+        candidates = candidates[:limit]
+        if not candidates:
+            return jsonify(requests=0, valid=0, suggestions=0, considered=0, reason='没有可唯一对应本页的新异常题')
+        numbers = [q['number'] for q in candidates]
+        if len(set(numbers)) != len(numbers):
+            fail('题号重复，需人工定位。', 409)
+        if not visual_reread_lock.acquire(blocking=False):
+            fail('已有视觉复读正在进行，请稍后重试。', 409)
+        try:
+            png = visual_crop_png(image_name, [0,0,page['width'],page['height']], page['display_rotation'])
+            with Image.open(io.BytesIO(png)) as image:
+                image.thumbnail((2400,2400))
+                encoded = io.BytesIO()
+                image.convert('RGB').save(encoded,'PNG')
+                png = encoded.getvalue()
+            # Full-page transmission is intentional; do not apply the single-question area guard.
+            release_archive_write_locks()
+            started = time.monotonic()
+            error_code = None
+            try:
+                items = reread_page(config, png, numbers)
+            except (ValueError, OSError) as exc:
+                error_code = str(exc) if isinstance(exc, VisualReviewError) else 'provider'
+                items = []
+            mapped = {item['number']: item for item in items}
+            with db() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                latest, _ = current(conn)
+                latest_q = {q['question_id']:q for q in latest['reviews']}
+                saved = 0
+                for q in candidates:
+                    current_q = latest_q[q['question_id']]
+                    if visual_revision(detail,q,revisions) != visual_revision(latest,current_q,review_page_revision(conn,sid)):
+                        continue
+                    item = mapped.get(q['number'], dict(status='ambiguous',transcript=''))
+                    readable = item['status'] == 'readable'
+                    score = (q['points'] if compare(item['transcript'],q['answer'],q['variants'])['matched'] else 0) if readable else None
+                    result = dict(item, scope='page', can_adopt=readable,
+                        suggested_score=score, max_score=q['points'], trigger='automatic' if automatic else 'manual',
+                        model=config['model'], elapsed_ms=round((time.monotonic()-started)*1000), error_code=error_code,
+                        crop=dict(page_id=pid,box=[0,0,page['width'],page['height']],rotation=page['display_rotation']))
+                    conn.execute('INSERT INTO visual_suggestions(submission_id,question_id,page_id,revision,created_at,result) VALUES(?,?,?,?,?,?)',
+                        (sid,q['question_id'],pid,visual_revision(latest,current_q,review_page_revision(conn,sid)),now(),dumps(result)))
+                    saved += int(readable)
+            response = dict(requests=1, valid=int(error_code is None), suggestions=saved, considered=len(candidates), error_code=error_code)
+            if error_code:
+                response['error'] = '整页复读失败（' + error_code + '），原记录保留，可检查设置后主动重试。'
+            return jsonify(response), 502 if error_code else 200
+        finally:
+            visual_reread_lock.release()
 
     @app.get('/api/submissions/<int:sid>/visual-suggestions/<int:vid>/image')
     def visual_suggestion_image(sid, vid):
@@ -1052,7 +1195,7 @@ def create_app(config=None):
 
     @app.post('/api/submissions/<int:sid>/reviews/<int:qid>/visual-reread')
     def visual_reread(sid, qid):
-        from settings import reread_handwriting, visual_review_config
+        from settings import reread_handwriting, visual_review_config, visual_error_code
 
         automatic = request.environ.get('moxieben.automatic_visual') is True
         ai_job = request.environ.get('moxieben.ai_review_job') if automatic else None
@@ -1137,10 +1280,10 @@ def create_app(config=None):
             started = time.monotonic()
             try:
                 result = reread_handwriting(config, png, question['number'])
-            except (ValueError, OSError):
+            except (ValueError, OSError) as exc:
                 if automatic:
                     app.logger.warning('Automatic visual reread failed for submission %s question %s', sid, qid)
-                fail('视觉复读未取得有效结果，可继续人工核对。', 502)
+                return jsonify(error='视觉复读未取得有效结果，可继续人工核对。',error_code=visual_error_code(exc)),502
             elapsed_ms = round((time.monotonic() - started) * 1000)
             score = None
             if result['status'] == 'readable':
@@ -1235,7 +1378,7 @@ def create_app(config=None):
                 machine = old['machine_text']
                 override = None
                 confirmed = True
-                reason = '教师核对局部图后采纳视觉复读，按严格规则计分。'
+                reason = '教师核对原图后采纳视觉复读，按严格规则计分。'
             elif quick:
                 if not conn.execute('SELECT 1 FROM pages WHERE submission_id=?', (sid,)).fetchone():
                     fail('请先上传作业原图，再进行教师判定。')

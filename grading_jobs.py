@@ -382,7 +382,8 @@ class GradingJobs:
             return
         if cursor >= len(ids) or not config['enabled'] or used >= limit:
             reasons = '；'.join(f'{reason} {count} 题' for reason,count in options.get('ai_skipped', {}).items())
-            message = (f'AI 复核结束：调用 {used} 题，自动解决 {resolved} 题。' if used else
+            stats = options.get('ai_metrics', {})
+            message = (f"AI 复核结束：尝试复读 {used} 题，图片请求 {stats.get('requests',used)} 次，有效返回 {stats.get('valid',0)} 次，生成建议 {stats.get('suggestions',0)} 题，自动解决 {resolved} 题。" if used else
                        '未调用 AI：没有符合安全复核条件的题目。')
             if not config['enabled']:
                 message = 'AI 自动复核已关闭。' + (f'此前已调用 {used} 题。' if used else '')
@@ -391,7 +392,10 @@ class GradingJobs:
         # Reserve the budget before calling a paid provider; interruption never repeats a charge.
         self.save(job, options=json.dumps(dict(options, ai_reserved=True)),
                   message=f'正在本机补定位并复核第 {cursor+1}/{len(ids)} 份答卷；首次加载定位模型可能较慢。')
-        count, accepted, skipped = self.app.extensions['automatic_ai_review'](ids[cursor], job['id'], limit - used)
+        count, accepted, skipped, metrics = self.app.extensions['automatic_ai_review'](ids[cursor], job['id'], limit - used)
+        stats = options.setdefault('ai_metrics', {})
+        for key, amount in metrics.items():
+            stats[key] = stats.get(key,0) + amount
         totals = options.setdefault('ai_skipped', {})
         for reason, amount in skipped.items():
             totals[reason] = totals.get(reason, 0) + amount
