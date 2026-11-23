@@ -106,6 +106,19 @@ def create_app(config=None):
     if (account_preview or tenant_mode) and data_dir.resolve().is_relative_to((ROOT / 'data').resolve()):
         raise ValueError('多账号模式需要独立数据目录，不能使用现有 data 目录。')
     data_dir.mkdir(parents=True, exist_ok=True)
+    if (account_preview or tenant_mode) and not app.secret_key:
+        key_file = data_dir / '.session-key'
+        try:
+            descriptor = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, 'w', encoding='ascii') as handle:
+                handle.write(secrets.token_hex(32))
+        local_key = key_file.read_text(encoding='ascii')
+        if not re.fullmatch(r'[0-9a-f]{64}', local_key):
+            raise ValueError('本地登录密钥无效，请先检查数据目录。')
+        app.secret_key = local_key
     database = data_dir / ('accounts.sqlite3' if account_preview else 'dictation.sqlite3')
     if tenant_mode and database.exists():
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as existing:
