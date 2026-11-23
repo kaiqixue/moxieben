@@ -12,7 +12,7 @@ from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import current_app, has_app_context, jsonify, request
+from flask import abort, current_app, g, has_app_context, jsonify, request
 from PIL import Image
 from paddle_cloud import JOB_URL, MODEL
 
@@ -32,11 +32,42 @@ def migrate(database):
             request_key TEXT PRIMARY KEY, job_id TEXT NOT NULL)''')
 
 
+def settings_keys(defaults=None):
+    """Reuse the settings table without sharing credentials between local teachers."""
+    prefix = ''
+    if has_app_context() and current_app.config.get('TEACHER_TENANT_MODE'):
+        owner = getattr(g, 'teacher_id', None)
+        if type(owner) is not int or owner < 1:
+            abort(403, description='识别设置缺少教师身份。')
+        prefix = f'teacher:{owner}:'
+    return {prefix + key: key for key in (DEFAULTS if defaults is None else defaults)}
+
+
+AI_DEFAULTS = dict(enabled=False, limit=8, base_url='', model='', api_key='')
+
+
+def read_ai_review(db):
+    if current_app.config.get('PRODUCTION_MODE'):
+        return dict(AI_DEFAULTS, **(current_app.config.get('VISUAL_REVIEW_CONFIG') or {}),
+                    enabled=current_app.config.get('AI_REVIEW_AUTO', False))
+    keys = settings_keys({'ai_review': ''})
+    with db() as conn:
+        found = conn.execute('SELECT value FROM settings WHERE key=?', (next(iter(keys)),)).fetchone()
+    return dict(AI_DEFAULTS, **(json.loads(found['value']) if found else {}))
+
+
+def public_ai_review(config):
+    return {k: config[k] for k in AI_DEFAULTS if k != 'api_key'} | {'api_key_configured': bool(config['api_key'])}
+
+
 def read_settings(db):
     if has_app_context() and current_app.config.get('PRODUCTION_MODE'):
         return dict(current_app.config['OCR_CONFIG'])
+    keys = settings_keys()
     with db() as conn:
-        return {**DEFAULTS, **{r['key']: r['value'] for r in conn.execute('SELECT key,value FROM settings')}}
+        rows = conn.execute(f"SELECT key,value FROM settings WHERE key IN ({','.join('?' for _ in keys)})",
+                            tuple(keys))
+        return {**DEFAULTS, **{keys[r['key']]: r['value'] for r in rows}}
 
 
 def public_settings(config):
@@ -208,6 +239,60 @@ def recognize_openai(path, config):
 def register_settings_routes(app, db):
     from app import fail
 
+    app.extensions['read_ai_review'] = lambda: read_ai_review(db)
+
+    @app.get('/api/settings/ai-review')
+    def get_ai_review_settings():
+        return jsonify(public_ai_review(read_ai_review(db)))
+
+    @app.patch('/api/settings/ai-review')
+    def update_ai_review_settings():
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) - (set(AI_DEFAULTS) | {'clear_key'}):
+            fail('AI 设置字段无效。')
+        config = read_ai_review(db)
+        if ('enabled' in payload and type(payload['enabled']) is not bool
+                or 'limit' in payload and (type(payload['limit']) is not int or not 1 <= payload['limit'] <= 100)
+                or 'clear_key' in payload and type(payload['clear_key']) is not bool):
+            fail('自动开关须为布尔值，每次最多复核 1 至 100 题。')
+        for key in AI_DEFAULTS:
+            if key not in payload:
+                continue
+            value = payload[key]
+            if key in ('base_url', 'model', 'api_key'):
+                if not isinstance(value, str) or len(value) > (4096 if key == 'api_key' else 2000):
+                    fail('AI 设置格式无效。')
+                value = value.strip()
+                if key == 'api_key' and not value:
+                    continue
+            config[key] = value
+        if payload.get('clear_key'):
+            config['api_key'] = ''
+        try:
+            url = urlsplit(config['base_url'])
+            if config['base_url'] and (url.scheme != 'https' or not url.hostname or url.username is not None
+                    or url.password is not None or url.query or url.fragment or url.port == 0):
+                raise ValueError()
+        except ValueError:
+            fail('AI 接口须为有效 HTTPS 地址，不能包含凭据或查询参数。')
+        if config['enabled'] and not all(config[k] for k in ('base_url', 'model', 'api_key')):
+            fail('请先完整配置支持图片的 AI 接口。')
+        with db() as conn:
+            conn.execute('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',
+                         (next(iter(settings_keys({'ai_review': ''}))), json.dumps(config)))
+        return jsonify(public_ai_review(config))
+
+    @app.post('/api/settings/ai-review/test')
+    def test_ai_review_settings():
+        config = read_ai_review(db)
+        image = io.BytesIO()
+        Image.new('RGB', (64, 64), 'white').save(image, 'PNG')
+        try:
+            reread_handwriting(config, image.getvalue(), 1)
+        except Exception:
+            return jsonify(ok=False, error='AI 图片接口测试失败，请检查图片支持、响应格式、凭据及额度。'), 400
+        return jsonify(ok=True, message='图片和结构化响应测试通过；真实手写准确率仍需验收。')
+
     @app.get('/api/settings')
     def get_settings():
         return jsonify(public_settings(read_settings(db)))
@@ -245,7 +330,8 @@ def register_settings_routes(app, db):
         if current['provider'] == 'paddle_cloud' and not all(current[k] for k in ('paddle_url', 'paddle_model', 'paddle_token')):
             fail('请填写 PaddleOCR 模型和 Token；Token 留空会保留已保存凭据。')
         with db() as conn:
-            conn.executemany('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)', current.items())
+            conn.executemany('INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)',
+                             [(stored, current[key]) for stored, key in settings_keys().items()])
         return jsonify(public_settings(current))
 
     @app.post('/api/settings/test')

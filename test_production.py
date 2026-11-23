@@ -55,6 +55,31 @@ class ProductionTests(unittest.TestCase):
                 load_config(dict(self.env, **{field: value}))
         self.assertFalse((self.root / 'data').exists())
 
+    def test_word_preview_requires_exact_https_origin_and_session_csrf(self):
+        from docx import Document
+        document = Document()
+        for line in ('This is a (1) ______.', '答案', '1. book'):
+            document.add_paragraph(line)
+        stream = io.BytesIO()
+        document.save(stream)
+        raw = stream.getvalue()
+        client = self.app().test_client()
+        self.assertEqual(self.signup(client, 'synthetic-word@example.test').status_code, 303)
+        token = self.token(client, '/')
+        headers = {'Origin': 'https://school.example.test', 'X-CSRF-Token': token}
+        response = client.post('/api/tasks/import-word', base_url='https://school.example.test',
+            headers=headers, data={'file': (io.BytesIO(raw), 'synthetic.docx')})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertEqual(response.json['questions'][0]['answer'], 'book')
+        for invalid in ({'X-CSRF-Token': token},
+                        dict(headers, Origin='https://evil.example.test'),
+                        dict(headers, **{'X-CSRF-Token': 'invalid'})):
+            with self.subTest(headers=list(invalid)):
+                response = client.post('/api/tasks/import-word', base_url='https://school.example.test',
+                    headers=invalid, data={'file': (io.BytesIO(raw), 'synthetic.docx')})
+                self.assertEqual(response.status_code, 403, response.json)
+        self.assertEqual(client.get('/api/tasks', base_url='https://school.example.test').json['tasks'], [])
+
     def test_domain_origin_cookie_health_and_persistent_session(self):
         app = self.app()
         client = app.test_client()
@@ -72,6 +97,15 @@ class ProductionTests(unittest.TestCase):
         self.assertEqual(restarted.get('/', base_url='https://school.example.test').status_code, 200)
         self.assertFalse(app.debug)
         self.assertEqual(client.get('/api/settings', base_url='https://school.example.test').status_code, 403)
+        self.assertEqual(client.get('/settings', base_url='https://school.example.test').status_code, 403)
+        self.assertNotIn('href="/settings"', client.get('/',
+                         base_url='https://school.example.test').get_data(as_text=True))
+        token = self.token(client, '/')
+        for method, path in [('patch', '/api/settings'), ('post', '/api/settings/test')]:
+            response = getattr(client, method)(path, base_url='https://school.example.test',
+                json={'provider': 'local'}, headers={'X-CSRF-Token': token,
+                                                    'Origin': 'https://school.example.test'})
+            self.assertEqual(response.status_code, 403)
         with closing(sqlite3.connect(self.root / 'data/dictation.sqlite3')) as conn:
             self.assertNotIn('fake-token-not-a-real-key', repr(conn.execute('SELECT * FROM settings').fetchall()))
         with app.app_context():

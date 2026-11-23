@@ -1,0 +1,5 @@
+ARG RUNTIME_IMAGE=moxieben-ci:runtime
+FROM ${RUNTIME_IMAGE}
+USER root
+RUN python -m pip install --no-cache-dir pypdf==6.21.4
+USER 10001:10001

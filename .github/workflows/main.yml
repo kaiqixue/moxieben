@@ -1,0 +1,173 @@
+name: Verify and release Staging
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  verify:
+    name: Linux tests and runtime image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Check frontend syntax and AI review state
+        run: |
+          node --check static/app.js
+          node --check static/classes.js
+          node --check static/workspace.js
+          node test_ai_review_ui.cjs
+      - name: Build the runtime image once
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --tag moxieben-ci:runtime .
+          docker build --file Dockerfile.ci --tag moxieben-ci:tests .
+      - name: Validate Compose with synthetic paths only
+        env:
+          APP_ENV: staging
+          APP_HOST: school.example.test
+          PADDLE_RESULT_HOSTS: results.example.test
+          REGISTRATION_OPEN: '0'
+        run: |
+          set -euo pipefail
+          export DATA_PATH="$RUNNER_TEMP/synthetic-data"
+          export SECRETS_PATH="$RUNNER_TEMP/synthetic-secrets"
+          mkdir -p "$DATA_PATH" "$SECRETS_PATH"
+          for name in session_key paddle_token visual_key; do
+            printf 'synthetic-only\n' > "$SECRETS_PATH/$name"
+          done
+          docker compose --project-name moxieben-staging config --quiet
+      - name: Run complete discovery without external network or business data
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/test-results"
+          chmod 777 "$RUNNER_TEMP/test-results"
+          docker run --rm --network none --read-only --no-healthcheck \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 --memory 4g \
+            --env MOXIEBEN_RUNTIME_ROOT=/app \
+            --tmpfs /tmp:rw,nosuid,mode=1777,size=1g \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/test-results,target=/results" \
+            --workdir /workspace --entrypoint python moxieben-ci:tests -B scripts/ci_verify.py
+      - name: Upload test summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: test-summary
+          path: ${{ runner.temp }}/test-results/summary.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Save the tested image for publication
+        if: github.repository == 'kaiqixue/moxieben' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: docker save moxieben-ci:runtime | gzip > "$RUNNER_TEMP/tested-runtime.tar.gz"
+      - name: Upload tested image
+        if: github.repository == 'kaiqixue/moxieben' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tested-runtime
+          path: ${{ runner.temp }}/tested-runtime.tar.gz
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish tested image to ACR
+    needs: verify
+    if: >-
+      github.repository == 'kaiqixue/moxieben' && github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request' && vars.ACR_REGISTRY != '' && vars.ACR_REPOSITORY != ''
+    environment: image-publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-runtime
+          path: ${{ runner.temp }}/image
+      - name: Publish with full Git SHA and resolve immutable digest
+        id: push
+        env:
+          ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+          ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+          ACR_USERNAME: ${{ secrets.ACR_PUSH_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PUSH_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ "$ACR_REGISTRY" =~ ^[a-z0-9.-]+$ ]]
+          [[ "$ACR_REPOSITORY" =~ ^[a-z0-9._-]+/[a-z0-9._-]+$ ]]
+          [[ -n "$ACR_USERNAME" && -n "$ACR_PASSWORD" ]]
+          export DOCKER_CONFIG="$RUNNER_TEMP/acr-auth"
+          mkdir -m 700 "$DOCKER_CONFIG"
+          trap 'docker logout "$ACR_REGISTRY" >/dev/null 2>&1 || true; rm -rf -- "$DOCKER_CONFIG"' EXIT
+          gzip -dc "$RUNNER_TEMP/image/tested-runtime.tar.gz" | docker load
+          repository="$ACR_REGISTRY/$ACR_REPOSITORY"
+          tag="$repository:sha-$GITHUB_SHA"
+          printf '%s' "$ACR_PASSWORD" | docker login "$ACR_REGISTRY" --username "$ACR_USERNAME" --password-stdin
+          docker tag moxieben-ci:runtime "$tag"
+          docker push "$tag"
+          image=$(docker image inspect "$tag" --format '{{json .RepoDigests}}' |
+            python3 -c 'import json,sys; prefix=sys.argv[1]+"@"; print(next(x for x in json.load(sys.stdin) if x.startswith(prefix)))' "$repository")
+          digest="${image#*@}"
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'Revision: `%s`\n\nImage: `%s`\n' "$GITHUB_SHA" "$image" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-staging:
+    name: Deploy Staging
+    needs: publish
+    if: vars.STAGING_AUTO_DEPLOY == 'true'
+    environment: staging
+    concurrency:
+      group: moxieben-staging-deploy
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Reject an outdated main revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          [[ "$current" == "$GITHUB_SHA" ]] || { echo 'Main has advanced; use the newer release run.'; exit 1; }
+      - name: Request restricted Staging update
+        env:
+          STAGING_HOST: ${{ vars.STAGING_SSH_HOST }}
+          STAGING_USER: ${{ vars.STAGING_SSH_USER }}
+          STAGING_PORT: ${{ vars.STAGING_SSH_PORT || '22' }}
+          KNOWN_HOSTS: ${{ vars.STAGING_SSH_KNOWN_HOSTS }}
+          SSH_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$STAGING_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
+          [[ "$STAGING_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ "$STAGING_PORT" =~ ^[0-9]{1,5}$ ]]
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ && "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ -n "$KNOWN_HOSTS" && -n "$SSH_KEY" ]]
+          key_dir=$(mktemp -d "$RUNNER_TEMP/staging-ssh.XXXXXX")
+          trap 'rm -rf -- "$key_dir"' EXIT
+          printf '%s\n' "$SSH_KEY" > "$key_dir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$key_dir/known_hosts"
+          chmod 600 "$key_dir/key" "$key_dir/known_hosts"
+          ssh -F /dev/null -i "$key_dir/key" -p "$STAGING_PORT" \
+            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$key_dir/known_hosts" -o ConnectTimeout=15 \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+            "$STAGING_USER@$STAGING_HOST" "deploy $DIGEST $GITHUB_SHA"
+          printf 'Staging verified: `%s` (`%s`)\n' "$GITHUB_SHA" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,126 @@
+{
+  "questions": [
+    {
+      "number": 1,
+      "kind": "grammar",
+      "context": "It is the time in a young person's life (1) _____________ they not only are faced with the mounting pressures of school, but also have to deal with their own physical and mental development as they navigate the rocky paths of personal self-discovery.",
+      "hint": ""
+    },
+    {
+      "number": 2,
+      "kind": "grammar",
+      "context": "It is a difficult time when they want to stand out and show their stuff while hoping to be able to find a place where they can fit in (2) _____________ both their peers and society.",
+      "hint": ""
+    },
+    {
+      "number": 3,
+      "kind": "grammar",
+      "context": "In a nutshell, a high-context society is one in which the group (3) _____________ (favor) over the individual as a result of a great many unwritten social rules and understandings.",
+      "hint": "favor"
+    },
+    {
+      "number": 4,
+      "kind": "grammar",
+      "context": "This is probably (4) _____________ Western societies, most of which are multi-cultural, are known for being plain-spoken.",
+      "hint": ""
+    },
+    {
+      "number": 5,
+      "kind": "grammar",
+      "context": "Western societies (5) _____________ (adopt) the word \"diversity\" as their motto.",
+      "hint": "adopt"
+    },
+    {
+      "number": 6,
+      "kind": "grammar",
+      "context": "This has led certain individuals and small groups within these respective societies (6) _____________ (demand) that special rights and social status be conferred upon them, which has gone on to create a significant amount of social chaos.",
+      "hint": "demand"
+    },
+    {
+      "number": 7,
+      "kind": "grammar",
+      "context": "China's high-context society, however, provides a solid basis wherein individuals can express their personalities while still (7) _____________ (make) positive contributions to society.",
+      "hint": "make"
+    },
+    {
+      "number": 8,
+      "kind": "grammar",
+      "context": "For instance, Jin Nong, one of the most famous painters in the group, was so poor during his childhood that he did not start painting (8) _____________ he was more than fifty years old.",
+      "hint": ""
+    },
+    {
+      "number": 9,
+      "kind": "grammar",
+      "context": "Eccentric though they may have been, Jin and the other seven artists would over time become (9) _____________ (incorporate) into Chinese culture and would go on to have significant influence over more modern painters such as Qi Baishi.",
+      "hint": "incorporate"
+    },
+    {
+      "number": 10,
+      "kind": "grammar",
+      "context": "(10) _____________ is important is that we tolerate these differences and remember that, in this big country and big world, we all belong and we all “fit in.”",
+      "hint": ""
+    }
+  ],
+  "blocks": [
+    {
+      "id": 4,
+      "text": "I have always thought that if you can survive high school, you can survive anything. It is the time in a young person's life (1)  $ \\underline{\\text{that}} $ they not only are faced with the mounting pressures of school, but also have to deal with their own physical and mental development as they navigate the rocky paths of personal self-discovery. It is a difficult time when they want to stand out and show their stuff while hoping to be able to find a place where they can fit in (2)  $ \\underline{\\text{among}} $ both their peers and society.",
+      "box": [
+        110,
+        270,
+        896,
+        421
+      ],
+      "confidence": null,
+      "approximate": true
+    },
+    {
+      "id": 5,
+      "text": "This problem of \"standing out\" and \"fitting in\" can be especially difficult in China which is, as sociologists call it, a \"high-context\" society. In a nutshell, a high-context society is one in which the group (3) is favored (favor) over the individual as a result of a great many unwritten social rules and understandings. It is a kind of code that people learn to adopt as they grow up in that culture. A \"low-context\" society, on the other hand, prioritizes the individual over the group, which encourages people to be specific in their social interactions. This is probably (4) why Western societies, most of which are multi-cultural, are known for being plain-spoken.",
+      "box": [
+        114,
+        408,
+        899,
+        594
+      ],
+      "confidence": null,
+      "approximate": true
+    },
+    {
+      "id": 6,
+      "text": "(does this mean that Chinese society is too conformist? I don't think so. Western societies (5)  $ \\underline{\\text{adopt}} $ the word \"diversity\" as their motto. This has led certain individuals and small groups within these respective societies (6)  $ \\underline{\\text{to demand}} $ (demand) that special rights and social status be conferred upon them, which has gone on to create a significant amount of social chaos. China's high-context society, however, provides a solid basis wherein individuals can express their personalities while still (7)  $ \\underline{\\text{making}} $ (make) positive contributions to society.",
+      "box": [
+        116,
+        570,
+        905,
+        767
+      ],
+      "confidence": null,
+      "approximate": true
+    },
+    {
+      "id": 7,
+      "text": "The Eight Eccentrics were Chinese artists who, in the middle of the Qing dynasty, altered the traditions of ink brush painting through their broad brush strokes and use of bright colours. They were \"eccentric\" because they were not trained artists who painted in the traditional way. For instance, Jin Nong, one of the most famous painters in the group, was so poor during his childhood that he did not start painting (8)  $ \\underline{\\text{when}} $ he was more than fifty years old. Eccentric though they may have been, Jin and the other seven artists would over time become (9)  $ \\underline{\\text{uncorporated}} $ (incorporate) into Chinese culture and would go on to have significant influence over more modern painters such as Qi Baishi.",
+      "box": [
+        118,
+        749,
+        913,
+        972
+      ],
+      "confidence": null,
+      "approximate": true
+    },
+    {
+      "id": 8,
+      "text": "Being a little different and \"standing out\"--whether it's you or someone else--is not necessarily a bad thing. (10) what is important is that we tolerate these differences and remember that, in this big country and big world, we all belong and we all \"fit in.\"",
+      "box": [
+        123,
+        950,
+        918,
+        1060
+      ],
+      "confidence": null,
+      "approximate": true
+    }
+  ]
+}

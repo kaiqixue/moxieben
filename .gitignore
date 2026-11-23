@@ -25,11 +25,16 @@ secrets/
 *.png
 !/static/images/teacher-desk.png
 *.zip
-/tests/fixtures/
+/tests/fixtures/*
+!/tests/fixtures/grammar_inline_ocr.json
+!/tests/fixtures/grammar_region_upright.json
 /docs/*
 !/docs/DEPLOY/
 !/docs/VLM-REVIEW-01-IMPLEMENTATION.md
 /scripts/*
+!/scripts/migrate_single_teacher.py
+!/scripts/ci_verify.py
+!/scripts/deploy_staging.py
 !/scripts/recognition_evidence_ui_server.py
 !/scripts/check_recognition_evidence_ui.cjs
 !/scripts/check_visual_review_ui.cjs

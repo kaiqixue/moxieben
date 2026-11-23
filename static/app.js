@@ -300,7 +300,25 @@ async function renderSettings() {
   $('#main').innerHTML = heading('识别设置', '选择本机识别、PaddleOCR 云端或 OpenAI 兼容图片接口。', '<a class="btn" href="/" data-nav>返回工作台</a>') +
     `<form id="settings-form" class="card"><div class="card-header"><div><h2>识别方式</h2><p>设置同时作用于照片中的学生身份与英文作答识别。云端速度取决于服务与网络。</p></div></div><div class="card-content form-grid"><label class="field">识别方式<select name="provider"><option value="local" ${data.provider === 'local' ? 'selected' : ''}>本机 PaddleOCR</option><option value="paddle_cloud" ${data.provider === 'paddle_cloud' ? 'selected' : ''}>PaddleOCR 云端（Jobs API）</option><option value="openai_compatible" ${data.provider === 'openai_compatible' ? 'selected' : ''}>OpenAI 兼容图片接口</option></select></label><p id="settings-local-note" class="notice">本机处理照片，不向外部服务上传；首次加载模型和 CPU 识别可能较慢。</p><div id="settings-openai-fields" class="form-grid"><label class="field">API 地址<input name="base_url" value="${escapeHTML(data.base_url || '')}" placeholder="https://api.example.com/v1"></label><label class="field">模型名<input name="model" value="${escapeHTML(data.model || '')}" placeholder="支持图片的模型名"></label><label class="field">OpenAI 兼容接口 API Key <span id="settings-key-status" class="muted tiny">${data.api_key_configured ? '已配置；留空保持不变' : '尚未配置'}</span><input name="api_key" type="password" autocomplete="new-password" placeholder="留空保留已配置密钥"></label><label class="inline-check"><input name="clear_key" type="checkbox">清除 OpenAI 接口 Key（请同时切到其他方式）</label></div><div id="settings-paddle-fields" class="form-grid"><label class="field">PaddleOCR Jobs 接口地址<input name="paddle_url" value="${escapeHTML(data.paddle_url || '')}" placeholder="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"></label><label class="field">PaddleOCR 模型<input name="paddle_model" value="${escapeHTML(data.paddle_model || 'PaddleOCR-VL-1.6')}"></label><label class="field">PaddleOCR Token <span id="settings-paddle-status" class="muted tiny">${data.paddle_token_configured ? '已配置；留空保持不变' : '尚未配置'}</span><input name="paddle_token" type="password" autocomplete="new-password" placeholder="填入 AI Studio 提供的 Token"></label><label class="inline-check"><input name="clear_paddle_token" type="checkbox">清除 PaddleOCR Token（请同时切到其他方式）</label><div class="notice">PaddleOCR 将提交图片任务、等待云端识别并下载文字结果，最长等待约 3 分钟，请保持页面打开。版面区域需要老师核对。</div></div><p class="tiny muted">凭据分开保存在本机数据库，页面不会回显。留空保留原凭据；测试连接会保存设置并发送一张系统样例图，服务商可能计费。</p><div class="button-row"><button class="btn primary" type="submit">保存设置</button><button class="btn" type="button" data-settings-action="test">保存并测试图片连接</button></div><div id="settings-message" role="status" aria-live="polite"></div><div class="notice warn" id="settings-cloud-note">云端模式会把照片发送到所填写的服务。自动批改会直接生成最终成绩，教师可对照原图修改并保存改判。</div></div></form>`;
   updateSettingsProvider();
+  const review = await api('/api/settings/ai-review');
+  if (version !== state.routeVersion || location.pathname !== '/settings') return;
+  $('#main').insertAdjacentHTML('beforeend', `<form id="ai-review-settings" class="card"><div class="card-content form-grid"><h2>AI 自动复核</h2><p>OCR 后自动复核能可靠定位的不确定短答，老师只处理剩余异常。使用支持图片的 OpenAI 兼容接口，独立于主 OCR 配置。</p><label class="inline-check"><input type="checkbox" name="enabled" ${review.enabled?'checked':''}>启用后台自动复核</label><label class="field">API 地址<input name="base_url" type="url" value="${escapeHTML(review.base_url)}" placeholder="https://api.example.com/v1"></label><label class="field">图片模型名<input name="model" value="${escapeHTML(review.model)}"></label><label class="field">API Key（${review.api_key_configured?'已配置，留空保留':'尚未配置'}）<input name="api_key" type="password" autocomplete="new-password"></label><label class="inline-check"><input name="clear_key" type="checkbox">清除已保存的 Key</label><label class="field">每次任务最多复核题数<input name="limit" type="number" min="1" max="100" value="${review.limit}"></label><p class="notice">启用后会将单题裁图发送至此服务，可能产生费用。无法定位、看不清或识别仍冲突的题保留给老师；已确认答案不会自动覆盖。</p><div class="button-row"><button class="btn primary" type="submit">保存 AI 设置</button><button class="btn" type="submit" name="test" value="1">保存并测试图片接口（可能计费）</button></div><p data-ai-message role="status" aria-live="polite"></p></div></form>`);
 }
+
+document.addEventListener('submit', async event => {
+  if(event.target.id !== 'ai-review-settings') return;
+  event.preventDefault();
+  const form=event.target, fields=form.elements, button=event.submitter;
+  await busyAction(button, async () => {
+    await api('/api/settings/ai-review', {method:'PATCH',body:{enabled:fields.enabled.checked,
+      limit:Number(fields.limit.value),base_url:fields.base_url.value,model:fields.model.value,
+      api_key:fields.api_key.value,clear_key:fields.clear_key.checked}});
+    fields.api_key.value='';fields.clear_key.checked=false;
+    let message='AI 设置已保存。';
+    if(button?.name==='test') message=(await api('/api/settings/ai-review/test',{method:'POST',body:{}})).message;
+    $('[data-ai-message]',form).textContent=message;
+  });
+});
 function updateSettingsProvider() {
   const provider = $('#settings-form')?.elements.provider.value;
   if (!provider) return;
@@ -641,6 +659,7 @@ function selectReviewQuestion(id) {
 }
 function recognitionEvidenceHTML(q) {
   const decision=q.auto_result;
+  if(decision?.ai_review) return `<div class="notice" role="note"><strong>AI 自动复核完成 · ${escapeHTML(decision.ai_review.model)}</strong><p>独立图片转录与局部 OCR 一致，系统按原文严格计分。原始识别证据已保留，教师仍可改判。</p><button class="btn small" data-action="undo-ai-review" data-id="${q.question_id}" data-event-id="${decision.ai_review.event_id}">撤销本次 AI 判定</button></div>`;
   if(!decision?.recognition_conflict || !decision.recognition_evidence?.length) return '';
   const labels={existing_ocr:'整页识别',supplementary_ocr:'整页补识别',region_supplementary_ocr:'局部补识别'};
   return `<div class="recognition-evidence notice warn" role="note" aria-label="识别结果对照"><strong>${q.uncertain?'识别结果不一致，请对照原图判定':'识别结果曾不一致，教师判定已保存'}</strong><dl>${decision.recognition_evidence.map(e=>`<div><dt>${labels[e.source]||'识别记录'}</dt><dd>${escapeHTML(e.transcript)}</dd></div>`).join('')}</dl><p>当前机器采用：${escapeHTML(decision.transcript)}；各次原文均保留。</p></div>`;
@@ -1031,6 +1050,15 @@ document.addEventListener('click', async event => {
   if(action==='return-context'){await Nav.back();return;}
   if (state.busy) return;
   if (action === 'undo-review') { await busyAction(button,undoReview);return; }
+  if (action === 'undo-ai-review') {
+    await busyAction(button, async () => {
+      if(hasDirty()) throw new Error('请先保存或放弃未保存的修改。');
+      const data=await api(`/api/submissions/${state.submission.id}/reviews/${id}/undo`,
+        {method:'POST',body:{event_id:Number(button.dataset.eventId)}});
+      state.submission=data;state.drafts.clear();renderSubmission();
+    });
+    return;
+  }
   if (action === 'dismiss-undo') { setReviewUndo(null);return; }
   if (action === 'delete-task') {
     await busyAction(button, async () => {

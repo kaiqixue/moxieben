@@ -64,7 +64,8 @@ def load_config(env):
             'DATA_DIR': data, 'SECRET_KEY': secret_file(env, 'SECRET_KEY_FILE', 64),
             'SESSION_COOKIE_SECURE': True, 'PUBLIC_ORIGIN': 'https://' + host,
             'TRUSTED_HOSTS': [host, 'localhost', '127.0.0.1'],
-            'PREFERRED_URL_SCHEME': 'https', 'OCR_CONFIG': ocr, 'VISUAL_REVIEW_CONFIG': visual}
+            'PREFERRED_URL_SCHEME': 'https', 'OCR_CONFIG': ocr, 'VISUAL_REVIEW_CONFIG': visual,
+            'AI_REVIEW_AUTO': env.get('VLM_REVIEW_AUTO') == '1'}
 
 
 def validate_outbound_url(value, allowed_hosts, *, resolve=True):

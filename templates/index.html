@@ -25,11 +25,11 @@
       <a class="nav-item" href="/assignments" data-nav>作业管理</a>
       <a class="nav-item" href="/classes" data-nav>班级与学生</a>
       <details class="nav-more"><summary class="nav-item">更多</summary><div class="nav-menu">
-        {% if not tenant_mode %}<a class="nav-item" href="/settings" data-nav>识别设置</a>{% endif %}
+        {% if settings_available %}<a class="nav-item" href="/settings" data-nav>识别设置</a>{% endif %}
         <button class="nav-item" id="guide-button">操作指南</button>
       </div></details>
     </nav>
-    <div class="sidebar-note"><span class="privacy-dot"></span> {{ '个人工作空间' if tenant_mode else '本地工作空间' }}<p>{{ '班级和成绩仅当前账号可见；云端识别会发送照片到平台配置的服务。' if tenant_mode else '记录保存在本机；云端模式会发送照片到配置服务。' }}<br>自动出成绩，老师可核对改判。</p></div>
+    <div class="sidebar-note"><span class="privacy-dot"></span> {{ '个人工作空间' if tenant_mode else '本地工作空间' }}<p>{{ ('班级和成绩仅当前账号可见；云端识别使用你配置的服务。' if settings_available else '班级和成绩仅当前账号可见；云端识别会发送照片到平台配置的服务。') if tenant_mode else '记录保存在本机；云端模式会发送照片到配置服务。' }}<br>自动出成绩，老师可核对改判。</p></div>
     <div class="sidebar-footer">让批改更轻松，让反馈更清晰。</div>
   </aside>
   <div class="app-shell">
