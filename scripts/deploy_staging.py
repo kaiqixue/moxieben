@@ -82,7 +82,8 @@ def check_compose(config):
     volumes = [v for v in app.get('volumes', []) if v.get('target') == '/var/lib/moxieben']
     require(len(volumes) == 1 and volumes[0].get('type') == 'bind'
             and volumes[0].get('source') == str(DATA) and not volumes[0].get('read_only')
-            and volumes[0].get('bind', {}).get('create_host_path') is False,
+            # Compose JSON omits false fields; an omitted flag is false, not permission to create a path.
+            and volumes[0].get('bind', {}).get('create_host_path', False) is False,
             'Existing persistent bind mount must be preserved')
     return env['APP_HOST']
 

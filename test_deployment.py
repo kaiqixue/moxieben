@@ -16,6 +16,15 @@ REVISION = 'b' * 40
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_compose_omitted_false_flag_stays_safe_but_explicit_true_is_rejected(self):
+        config={'name':'moxieben-staging','services':{'app':{
+            'environment':{'APP_ENV':'staging','REGISTRATION_OPEN':'0','DATA_DIR':'/var/lib/moxieben','APP_HOST':'school.example.test'},
+            'volumes':[{'type':'bind','source':str(release.DATA),'target':'/var/lib/moxieben','bind':{}}]},'caddy':{}}}
+        self.assertEqual(release.check_compose(config),'school.example.test')
+        config['services']['app']['volumes'][0]['bind']['create_host_path']=True
+        with self.assertRaises(release.ReleaseError):
+            release.check_compose(config)
+
     def test_forced_command_accepts_only_digest_and_full_revision(self):
         self.assertEqual(release.parse_command(f'deploy {DIGEST} {REVISION}'), (DIGEST, REVISION))
         for command in ('bash', f'deploy latest {REVISION}', f'deploy {DIGEST} main',
