@@ -302,7 +302,7 @@ async function renderSettings() {
   updateSettingsProvider();
   const review = await api('/api/settings/ai-review');
   if (version !== state.routeVersion || location.pathname !== '/settings') return;
-  $('#main').insertAdjacentHTML('beforeend', `<form id="ai-review-settings" class="card"><div class="card-content form-grid"><h2>AI 自动复核</h2><p>OCR 后自动复核能可靠定位的不确定短答，老师只处理剩余异常。使用支持图片的 OpenAI 兼容接口，独立于主 OCR 配置。</p><label class="inline-check"><input type="checkbox" name="enabled" ${review.enabled?'checked':''}>启用后台自动复核</label><label class="field">API 地址<input name="base_url" type="url" value="${escapeHTML(review.base_url)}" placeholder="https://api.example.com/v1"></label><label class="field">图片模型名<input name="model" value="${escapeHTML(review.model)}"></label><label class="field">API Key（${review.api_key_configured?'已配置，留空保留':'尚未配置'}）<input name="api_key" type="password" autocomplete="new-password"></label><label class="inline-check"><input name="clear_key" type="checkbox">清除已保存的 Key</label><label class="field">每次任务最多复核题数<input name="limit" type="number" min="1" max="100" value="${review.limit}"></label><p class="notice">启用后会将单题裁图发送至此服务，可能产生费用。无法定位、看不清或识别仍冲突的题保留给老师；已确认答案不会自动覆盖。</p><div class="button-row"><button class="btn primary" type="submit">保存 AI 设置</button><button class="btn" type="submit" name="test" value="1">保存并测试图片接口（可能计费）</button></div><p data-ai-message role="status" aria-live="polite"></p></div></form>`);
+  $('#main').insertAdjacentHTML('beforeend', `<form id="ai-review-settings" class="card"><div class="card-content form-grid"><h2>AI 自动复核</h2><p>OCR 后先复核单题；单题定位不足时发送整页照片，按题号生成复读建议。老师核对后可一键采纳。使用支持图片的 OpenAI 兼容接口，独立于主 OCR 配置。</p><label class="inline-check"><input type="checkbox" name="enabled" ${review.enabled?'checked':''}>启用后台自动复核</label><label class="field">API 地址<input name="base_url" type="url" value="${escapeHTML(review.base_url)}" placeholder="https://api.example.com/v1"></label><label class="field">图片模型名<input name="model" value="${escapeHTML(review.model)}"></label><label class="field">API Key（${review.api_key_configured?'已配置，留空保留':'尚未配置'}）<input name="api_key" type="password" autocomplete="new-password"></label><label class="inline-check"><input name="clear_key" type="checkbox">清除已保存的 Key</label><label class="field">每次任务最多复核题数<input name="limit" type="number" min="1" max="100" value="${review.limit}"></label><p class="notice">启用后会将单题裁图或整页照片（可能含姓名、学号）发送至此服务，可能产生费用。无法定位、看不清或识别仍冲突的题保留给老师；已确认答案不会自动覆盖。</p><div class="button-row"><button class="btn primary" type="submit">保存 AI 设置</button><button class="btn" type="submit" name="test" value="1">保存并测试图片接口（可能计费）</button></div><p data-ai-message role="status" aria-live="polite"></p></div></form>`);
 }
 
 document.addEventListener('submit', async event => {
@@ -677,13 +677,16 @@ function visualReviewHTML(q) {
   const button = (action, label, disabled = false, variant = '') =>
     `<button class="btn small ${variant}" data-action="${action}" data-id="${q.question_id}" ${disabled ? 'disabled' : ''}>${label}</button>`;
   const label = {unreadable:'笔迹无法辨认', blank:'疑似空白，请核对原图', ambiguous:'笔迹或位置不能确定'};
-  const result = suggestion ? `<img alt="送给视觉模型的本题局部图" src="${escapeHTML(suggestion.preview_url)}"><p>复读转录 <strong>${suggestion.status === 'readable' ? escapeHTML(suggestion.transcript) : label[suggestion.status] || '无法核实'}</strong></p>
+  const result = suggestion ? `<img alt="送给视觉模型的${suggestion.scope==='page'?'整页照片':'本题局部图'}" src="${escapeHTML(suggestion.preview_url)}"><p>${suggestion.scope==='page'?'整页多题复读 · ':''}复读转录 <strong>${suggestion.status === 'readable' ? escapeHTML(suggestion.transcript) : label[suggestion.status] || '无法核实'}</strong></p>
+    ${suggestion.error_code ? '<p class="status-danger">图片接口未取得有效结果，请检查设置后重试整页复读。</p>' : ''}
     ${suggestion.suggested_score == null ? '' : `<p>建议 ${numberText(suggestion.suggested_score)} / ${numberText(suggestion.max_score)} 分</p>`}
     ${suggestion.can_adopt ? button('visual-adopt', attentionContext ? '采纳并下一项' : '采纳复读建议', locked, 'primary') : '<p class="tiny muted">请对照原图使用下方人工判定。</p>'}` : '';
   return `<section class="visual-review notice" aria-label="视觉复读建议"><strong>视觉复读</strong>
     <p class="tiny muted">${state.draw === 'visual' ? '请在原图拖动，只圈本题作答。' : '框选本题作答后，可发送局部图复读。请避开姓名、学号和相邻题。'}</p>
     <div class="button-row">${button('visual-select', state.draw === 'visual' ? '取消框选' : frame ? '重新框选' : '框选作答', locked || pending)}
-    ${frame ? button('visual-run', pending ? '正在复读…' : '发送局部图复读', locked || pending) : ''}</div>
+    ${frame ? button('visual-run', pending ? '正在复读…' : '发送局部图复读', locked || pending) : ''}
+    ${button('visual-page', pending ? '正在复读…' : '整页多题复读', locked || pending)}</div>
+    <p class="tiny muted">整页复读会发送当前照片（可能含姓名、学号），可能计费。按题号生成建议，采纳后更新成绩。</p>
     <p role="status" class="tiny ${feedback ? 'status-danger' : 'muted'}">${escapeHTML(feedback || (pending ? '正在复读，可继续人工核对。' : ''))}</p>${result}</section>`;
 }
 
@@ -691,6 +694,29 @@ function renderVisualReview() {
   const panel = $('#visual-review');
   const q = state.submission?.reviews.find(item=>item.question_id===state.activeQuestion);
   if (panel) panel.innerHTML = visualReviewHTML(q);
+}
+
+async function requestPageReread(id) {
+  const sub=state.submission, version=state.routeVersion, pageId=state.pageId;
+  if(visualPending || state.busy || !pageId) return;
+  visualPending={version,question:id}; visualFeedback=null; renderVisualReview();
+  let message='已生成整页复读建议，请逐题核对并采纳。';
+  try {
+    const result=await api(`/api/submissions/${sub.id}/visual-reread-page`,{method:'POST',body:{page_id:pageId}});
+    if(!result.suggestions) message=result.reason || '本页未生成可采纳建议，请核对原图。';
+  } catch(error) { message=error.message; }
+  finally {
+    visualPending=null;
+    if(state.submission===sub && state.routeVersion===version) {
+      try {
+        const fresh=await api(`/api/submissions/${sub.id}`);
+        if(state.routeVersion===version) state.submission=fresh;
+      } catch { message+='；状态刷新失败，请刷新页面查看已保存结果。'; }
+      if(state.routeVersion===version) {
+        visualFeedback={version,question:id,message}; renderVisualReview();
+      }
+    }
+  }
 }
 
 async function requestVisualReread(id) {
@@ -1096,6 +1122,7 @@ document.addEventListener('click', async event => {
     if (state.draw) $('#photo-scroll')?.scrollIntoView({block:'nearest'});
     return;
   }
+  if (action === 'visual-page') { await requestPageReread(id); return; }
   if (action === 'visual-run') { await requestVisualReread(id); return; }
   if (action === 'visual-adopt') {
     const suggestion = state.submission.visual_suggestions?.[id];

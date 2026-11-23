@@ -29,6 +29,9 @@ with patch('settings.recognize_selected') as cloud:
     result=case.post(f'/api/submissions/{sid}/auto-grade',{'reextract':True})
     assert result.status_code==200,result.json
     cloud.assert_not_called()
+case.client.patch('/api/settings/ai-review',json=dict(enabled=True,limit=8,
+    base_url='https://vision.example.test/v1',model='synthetic-vision',api_key='synthetic-key'),headers=case.headers)
 with patch('settings.visual_review_config',return_value={'model':'synthetic-vision'}), \
+     patch('settings.reread_page',return_value=[dict(number=2,status='readable',transcript='demand')]), \
      patch('settings.reread_handwriting',return_value={'status':'readable','transcript':'demand'}):
     case.app.run(host='127.0.0.1',port=int(os.environ.get('RECOGNITION_TEST_PORT','5033')),debug=False,use_reloader=False)
