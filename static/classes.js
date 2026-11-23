@@ -120,6 +120,7 @@ async function classAction(button, callback) {
     state.busy = false;
     controls.forEach((control,index) => { if (control.isConnected) control.disabled = previouslyDisabled[index]; });
     setButtonBusy(button,false);
+    if ($('#attention-results') && classUI.attention) Workspace.attention(classUI.attention);
     if ($('#batch-photo-queue')) { renderBatchPhotos(); renderGradingJob(classUI.job); }
   }
 }
@@ -329,7 +330,7 @@ function renderGradingJob(job) {
   const layout = $('#batch-answer-layout'); if (layout) layout.disabled = !!unfinished||state.busy;
   const start = $('[data-class-action=batch-start]');
   if (start) { start.disabled = !!active; start.textContent = active ? '后台处理中' : job && ['interrupted','failed'].includes(job.state) ? '继续后台批改' : '处理已上传照片'; }
-  panel.innerHTML = !job ? '<p class="tiny muted">照片上传结束后可离开页面；本机服务需保持运行。</p>' : `<div class="notice ${job.state === 'interrupted' || job.state === 'failed' ? 'warn' : ''}"><strong>${escapeHTML(({queued:'本批等待处理',running:'本批处理中',interrupted:'本批处理已中断',failed:'本批任务失败',done:'批改完成，查看成绩'})[job.state] || job.state)}</strong>${job.total ? ` · ${escapeHTML(({identifying:'识别学生',matching:'匹配名单',grading:'自动计分'})[job.stage] || '')} ${numberText(job.completed)} / ${numberText(job.total)}` : ''}<br>${job.state==='done'&&!job.total?'本次没有新增待批改答卷。全班完成情况见上方汇总。':escapeHTML(job.message)}${active ? '<br>可以离开本页面，本机服务开启时继续处理。' : ''}${job.state === 'interrupted' || job.state === 'failed' ? '<br>请先继续本次任务，结束后再上传新照片。' : ''}${job.errors?.length ? `<br>${job.errors.length} 项处理失败，原图已保留；可在全班异常中核对。` : ''}</div>`;
+  panel.innerHTML = !job ? '<p class="tiny muted">照片上传结束后可离开页面；本机服务需保持运行。</p>' : `<div class="notice ${job.state === 'interrupted' || job.state === 'failed' ? 'warn' : ''}"><strong>${escapeHTML(({queued:'本批等待处理',running:'本批处理中',interrupted:'本批处理已中断',failed:'本批任务失败',done:'批改完成，查看成绩'})[job.state] || job.state)}</strong>${job.total ? ` · ${escapeHTML(({identifying:'识别学生',matching:'匹配名单',grading:'自动计分',ai_review:'AI 复核'})[job.stage] || '')} ${numberText(job.completed)} / ${numberText(job.total)}` : ''}<br>${job.state==='done'&&!job.total?'本次没有新增待批改答卷。全班完成情况见上方汇总。':escapeHTML(job.message)}${active ? '<br>可以离开本页面，本机服务开启时继续处理。' : ''}${job.state === 'interrupted' || job.state === 'failed' ? '<br>请先继续本次任务，结束后再上传新照片。' : ''}${job.errors?.length ? `<br>${job.errors.length} 项处理失败，原图已保留；可在全班异常中核对。` : ''}</div>`;
   if(job?.state==='done')panel.insertAdjacentHTML('beforeend',`<a class="btn" data-nav href="/assignments/${classUI.data.id}?tab=grades">查看成绩</a>`);
   if(classUI.refreshPending)panel.insertAdjacentHTML('beforeend','<p class="tiny muted" role="status">批改进度已更新，结束当前操作后自动刷新名单。</p>');
   if(classUI.photoReadError)panel.insertAdjacentHTML('beforeend',`<p class="notice warn">照片列表暂时无法获取，正在重新读取；不必重复上传。${escapeHTML(classUI.photoReadError)}</p>`);
@@ -356,7 +357,7 @@ async function loadAssignmentWorkbench(aid) {
     if(classUI.refreshPending && !classUI.photoReadError && !hasListInteraction()) {
       const latest=await api(`/api/assignments/${aid}`);if(version!==state.routeVersion)return;classUI.data=latest;classUI.refreshPending=false;
     }
-    renderAttention(attention);classUI.job=data.job;
+    classUI.job=data.job;renderAttention(attention);
     if(!document.activeElement?.closest('#batch-job-status')&&!$('#class-dialog'))renderGradingJob(data.job);
     clearTimeout(classJobTimer);
     if (classUI.photoReadError || classUI.refreshPending || data.job && ['queued','running'].includes(data.job.state) || classUI.data?.students?.some(s=>recognitionFor(s).state==='processing') || hasListInteraction() || document.activeElement?.closest('#attention-results,#batch-job-status')) classJobTimer = setTimeout(() => loadAssignmentWorkbench(aid),1500);
@@ -672,7 +673,11 @@ document.addEventListener('click', async event => {
   const action = button.dataset.classAction;
   if (!classBeforeReplace()) return;
   await classAction(button, async () => {
-    if (action === 'batch-start' || action === 'batch-identify-all' || action === 'batch-grade-all') {
+    if (action === 'batch-ai-review') {
+      const data = await api(`/api/assignments/${classUI.data.id}/ai-review-jobs`, {method:'POST',body:{}});
+      renderGradingJob(data.job);
+      await classRefresh();
+    } else if (action === 'batch-start' || action === 'batch-identify-all' || action === 'batch-grade-all') {
       await beginBackgroundGrading();
     } else if (action === 'batch-refresh-workbench') {
       await loadAssignmentWorkbench(classUI.data.id);

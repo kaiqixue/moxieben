@@ -42,10 +42,72 @@ class TenantIsolationTests(unittest.TestCase):
     def post(self, client, path, data):
         return client.post(path, json=data, headers={'X-CSRF-Token': self.token(client)})
 
+    def word_file(self, lines):
+        from docx import Document
+        document = Document()
+        for line in lines:
+            document.add_paragraph(line)
+        stream = io.BytesIO()
+        document.save(stream)
+        stream.seek(0)
+        return stream, 'synthetic.docx'
+
+    def test_word_previews_are_private_and_do_not_create_records_or_uploads(self):
+        from pathlib import Path
+        uploads = Path(self.data_dir) / 'uploads'
+        before = set(uploads.iterdir())
+        drafts = []
+        for client, answer in [(self.a, 'book'), (self.b, 'pencil')]:
+            token = self.token(client)
+            grammar = client.post('/api/tasks/import-word', data={'file': self.word_file([
+                '每题 1 分', 'This is a (1) ______.', '答案', f'1. {answer}'])},
+                headers={'X-CSRF-Token': token})
+            self.assertEqual(grammar.status_code, 200, grammar.json)
+            self.assertEqual(grammar.json['questions'][0]['answer'], answer)
+            drafts.append(grammar.json)
+            answers = client.post('/api/tasks/import-word', data={'mode': 'answers',
+                'file': self.word_file(['半句', f'1. {answer}'])}, headers={'X-CSRF-Token': token})
+            self.assertEqual(answers.status_code, 200, answers.json)
+            self.assertEqual(answers.json['groups'][0]['items'][0]['answer'], answer)
+            self.assertEqual(client.get('/api/tasks').json['tasks'], [])
+        self.assertEqual(set(uploads.iterdir()), before)
+        with closing(sqlite3.connect(f'{self.data_dir}/dictation.sqlite3')) as conn:
+            for table in ('tasks', 'questions', 'assignments', 'submissions'):
+                self.assertEqual(conn.execute(f'SELECT count(*) FROM {table}').fetchone()[0], 0)
+        saved = self.post(self.a, '/api/tasks', drafts[0])
+        self.assertEqual(saved.status_code, 201, saved.json)
+        tid = saved.json['id']
+        self.assertEqual(self.a.get(f'/api/tasks/{tid}').status_code, 200)
+        self.assertEqual(self.b.get(f'/api/tasks/{tid}').status_code, 404)
+        self.assertEqual(self.b.get('/api/tasks').json['tasks'], [])
+        own_class = self.post(self.a, '/api/classes', {'name': '合成班级'}).json['id']
+        self.assertEqual(self.post(self.a, f'/api/tasks/{tid}/assignments',
+                                  {'class_ids': [own_class]}).status_code, 201)
+        self.assertEqual(self.post(self.b, f'/api/tasks/{tid}/assignments',
+                                  {'class_ids': [own_class]}).status_code, 404)
+
+    def test_word_preview_keeps_login_csrf_origin_role_and_file_validation(self):
+        self.assertEqual(self.app.test_client().post('/api/tasks/import-word').status_code, 401)
+        token = self.token(self.a)
+        self.assertEqual(self.a.post('/api/tasks/import-word').status_code, 403)
+        self.assertEqual(self.a.post('/api/tasks/import-word', headers={
+            'X-CSRF-Token': token, 'Origin': 'https://evil.example.test'}).status_code, 403)
+        for mode in ('', 'answers'):
+            with self.subTest(mode=mode):
+                response = self.a.post('/api/tasks/import-word', data={
+                    'mode': mode, 'file': (io.BytesIO(b'not a docx'), 'invalid.docx')},
+                    headers={'X-CSRF-Token': token})
+                self.assertEqual(response.status_code, 400, response.json)
+        admin_token = self.token(self.b)
+        with closing(sqlite3.connect(f'{self.data_dir}/dictation.sqlite3')) as conn, conn:
+            conn.execute("UPDATE users SET role='platform_admin' WHERE email=?", ('teacher-b@example.test',))
+        self.assertEqual(self.b.post('/api/tasks/import-word',
+                                    headers={'X-CSRF-Token': admin_token}).status_code, 403)
+
     def test_class_and_task_are_visible_only_to_owner(self):
         home = self.a.get('/').get_data(as_text=True)
         self.assertIn('teacher-a@example.test', home)
-        self.assertNotIn('href="/settings"', home)
+        self.assertIn('href="/settings"', home)
         klass = self.post(self.a, '/api/classes', {'name': '甲班'}).json['id']
         task = self.post(self.a, '/api/tasks', {'name': '甲作业', 'questions': [
             {'number': 1, 'kind': 'word', 'answer': 'book', 'points': 1}]}).json['id']
@@ -58,7 +120,106 @@ class TenantIsolationTests(unittest.TestCase):
         self.assertEqual(self.b.patch(f'/api/classes/{klass}', json={'name': '篡改'},
             headers={'X-CSRF-Token': self.token(self.b)}).status_code, 404)
         self.assertEqual(self.a.get(f'/api/classes/{klass}').json['name'], '甲班')
+        self.assertEqual(self.b.get('/api/settings').status_code, 200)
+        self.assertFalse(self.b.get('/api/settings').json['api_key_configured'])
+
+    def test_local_ocr_settings_are_private_persistent_and_do_not_inherit_shared_keys(self):
+        with closing(sqlite3.connect(f'{self.data_dir}/dictation.sqlite3')) as conn, conn:
+            conn.execute("UPDATE settings SET value='synthetic-legacy-secret' WHERE key='api_key'")
+        self.assertEqual(self.a.get('/settings').status_code, 200)
+        self.assertFalse(self.a.get('/api/settings').json['api_key_configured'])
+        for client, model, secret in [(self.a, 'model-a', 'synthetic-secret-a'),
+                                      (self.b, 'model-b', 'synthetic-secret-b')]:
+            response = client.patch('/api/settings', json={'provider': 'openai_compatible',
+                'base_url': 'https://vision.example.test/v1', 'model': model, 'api_key': secret},
+                headers={'X-CSRF-Token': self.token(client)})
+            self.assertEqual(response.status_code, 200, response.json)
+            self.assertTrue(response.json['api_key_configured'])
+            self.assertNotIn(secret, response.get_data(as_text=True))
+        self.assertEqual(self.a.get('/api/settings').json['model'], 'model-a')
+        self.assertEqual(self.b.get('/api/settings').json['model'], 'model-b')
+        with closing(sqlite3.connect(f'{self.data_dir}/dictation.sqlite3')) as conn:
+            self.assertEqual(conn.execute("SELECT value FROM settings WHERE key='api_key'").fetchone()[0],
+                             'synthetic-legacy-secret')
+        restarted = create_app({'DATA_DIR': self.data_dir, 'TESTING': True, 'TEACHER_TENANT_MODE': True})
+        client = restarted.test_client()
+        self.login(client, 'teacher-a@example.test')
+        self.assertEqual(client.get('/api/settings').json['model'], 'model-a')
+        client.patch('/api/settings', json={'model': 'model-a-updated'},
+                     headers={'X-CSRF-Token': self.token(client)})
+        with patch('settings.test_openai_compatible', return_value={'message': 'synthetic ok'}) as connection:
+            response = client.post('/api/settings/test', headers={'X-CSRF-Token': self.token(client)})
+        self.assertEqual(response.status_code, 200, response.json)
+        connection.assert_called_once_with('https://vision.example.test/v1', 'model-a-updated', 'synthetic-secret-a')
+        self.assertNotIn('synthetic-secret-a', response.get_data(as_text=True))
+        response = client.patch('/api/settings', json={'provider': 'paddle_cloud',
+            'paddle_token': 'synthetic-paddle-a'}, headers={'X-CSRF-Token': self.token(client)})
+        self.assertEqual(response.status_code, 200, response.json)
+        self.assertTrue(response.json['paddle_token_configured'])
+        self.assertNotIn('synthetic-paddle-a', response.get_data(as_text=True))
+        self.assertFalse(self.b.get('/api/settings').json['paddle_token_configured'])
+        with patch('paddle_cloud.test_connection', return_value={'ok': True, 'message': 'synthetic ok'}) as paddle:
+            self.assertEqual(client.post('/api/settings/test',
+                headers={'X-CSRF-Token': self.token(client)}).status_code, 200)
+        self.assertEqual(paddle.call_args.args[0]['paddle_token'], 'synthetic-paddle-a')
+        response = client.patch('/api/settings', json={'provider': 'local', 'api_key': '',
+            'paddle_token': ''}, headers={'X-CSRF-Token': self.token(client)})
+        self.assertFalse(response.json['api_key_configured'])
+        self.assertFalse(response.json['paddle_token_configured'])
+        self.assertTrue(self.b.get('/api/settings').json['api_key_configured'])
+
+    def test_local_ocr_dispatch_uses_the_resource_owners_api_for_direct_and_background_requests(self):
+        import teacher_auth
+        resources = []
+        for client, model, secret in [(self.a, 'model-a', 'synthetic-secret-a'),
+                                      (self.b, 'model-b', 'synthetic-secret-b')]:
+            response = client.patch('/api/settings', json={'provider': 'openai_compatible',
+                'base_url': 'https://vision.example.test/v1', 'model': model, 'api_key': secret},
+                headers={'X-CSRF-Token': self.token(client)})
+            self.assertEqual(response.status_code, 200, response.json)
+            tid = self.post(client, '/api/tasks', {'name': '合成作业', 'questions': [
+                {'number': 1, 'kind': 'word', 'answer': 'book', 'points': 1}]}).json['id']
+            sid = self.post(client, f'/api/tasks/{tid}/submissions', {'student_code': '001'}).json['id']
+            image = io.BytesIO()
+            Image.new('RGB', (30, 30), 'white').save(image, 'PNG')
+            page = client.post(f'/api/submissions/{sid}/pages',
+                data={'image': (io.BytesIO(image.getvalue()), 'synthetic.png')},
+                headers={'X-CSRF-Token': self.token(client)})
+            self.assertEqual(page.status_code, 201, page.json)
+            resources.append(page.json['id'])
+        with patch('settings.recognize_openai', return_value={'blocks': [], 'model': 'synthetic'}) as cloud:
+            result = self.a.post(f'/api/pages/{resources[0]}/ocr', json={},
+                                 headers={'X-CSRF-Token': self.token(self.a)})
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertEqual(cloud.call_args.args[1]['api_key'], 'synthetic-secret-a')
+            owner = None
+            with closing(sqlite3.connect(f'{self.data_dir}/dictation.sqlite3')) as conn:
+                owner = conn.execute("SELECT id FROM users WHERE email='teacher-b@example.test'").fetchone()[0]
+            result = teacher_auth.internal_post(self.app, f'/api/pages/{resources[1]}/ocr', {}, owner_id=owner)
+            self.assertEqual(result.status_code, 200, result.json)
+            self.assertEqual(cloud.call_args.args[1]['api_key'], 'synthetic-secret-b')
+            calls = cloud.call_count
+            result = self.a.post(f'/api/pages/{resources[1]}/ocr', json={},
+                                 headers={'X-CSRF-Token': self.token(self.a)})
+            self.assertEqual(result.status_code, 404)
+            self.assertEqual(cloud.call_count, calls)
+
+    def test_local_ocr_settings_keep_session_csrf_origin_and_role_guards(self):
+        from settings import read_settings
+        from werkzeug.exceptions import Forbidden
+        with self.app.app_context(), self.assertRaises(Forbidden):
+            read_settings(None)
+        self.assertEqual(self.app.test_client().get('/api/settings').status_code, 401)
+        token = self.token(self.a)
+        self.assertEqual(self.a.patch('/api/settings', json={'provider': 'local'}).status_code, 403)
+        self.assertEqual(self.a.patch('/api/settings', json={'provider': 'local'},
+            headers={'X-CSRF-Token': token, 'Origin': 'https://evil.example.test'}).status_code, 403)
+        token_b = self.token(self.b)
+        with closing(sqlite3.connect(f'{self.data_dir}/dictation.sqlite3')) as conn, conn:
+            conn.execute("UPDATE users SET role='platform_admin' WHERE email='teacher-b@example.test'")
         self.assertEqual(self.b.get('/api/settings').status_code, 403)
+        self.assertEqual(self.b.patch('/api/settings', json={'provider': 'local'},
+                                     headers={'X-CSRF-Token': token_b}).status_code, 403)
 
     def test_cross_teacher_assignment_is_rejected(self):
         klass = self.post(self.a, '/api/classes', {'name': '甲班'}).json['id']

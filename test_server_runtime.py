@@ -31,7 +31,9 @@ class ServerRuntimeTests(unittest.TestCase):
                 log = (root / 'server.log').open('a')
                 process = subprocess.Popen([sys.executable, '-m', 'gunicorn', '--config',
                     'gunicorn.conf.py', '--bind', f'127.0.0.1:{port}', 'wsgi:app'],
-                    cwd=Path(__file__).parent, env=env, stdout=log, stderr=log)
+                    # CI must exercise the packaged /app, not the mounted source checkout.
+                    cwd=Path(os.environ.get('MOXIEBEN_RUNTIME_ROOT', Path(__file__).parent)),
+                    env=env, stdout=log, stderr=log)
                 log.close()
                 try:
                     for _ in range(150):
@@ -58,6 +60,11 @@ class ServerRuntimeTests(unittest.TestCase):
                     'Host': 'school.example.test', 'X-Forwarded-Proto': 'https'})
                 with urllib.request.urlopen(request, timeout=5) as response:
                     self.assertIn('login-form', response.read().decode())
+                asset = urllib.request.Request(base + '/static/theme.css', headers={
+                    'Host': 'school.example.test', 'X-Forwarded-Proto': 'https'})
+                with urllib.request.urlopen(asset, timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                    self.assertGreater(len(response.read()), 100)
                 marker = root / 'data/uploads/synthetic.marker'
                 marker.write_text('preserved')
             finally:

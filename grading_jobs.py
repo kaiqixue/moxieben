@@ -1,7 +1,6 @@
 """Local durable batch progress; existing routes own OCR, matching and scoring."""
 import json
 import threading
-from contextlib import nullcontext
 
 from flask import abort, g, jsonify, request
 from teacher_auth import internal_post
@@ -40,6 +39,17 @@ def register(app, db, row, stamp):
         with db() as conn:
             row(conn, 'assignments', aid)
         result = runner.enqueue(assignment_id=aid)
+        runner.kick()
+        return jsonify(job=result), 202
+
+    @app.post('/api/assignments/<int:aid>/ai-review-jobs')
+    def start_ai_review_job(aid):
+        payload()
+        with db() as conn:
+            row(conn, 'assignments', aid)
+        if not app.extensions['read_ai_review']()['enabled']:
+            abort(409, description='请先配置并启用 AI 自动复核。')
+        result = runner.enqueue(assignment_id=aid, options={'ai_review_only': True})
         runner.kick()
         return jsonify(job=result), 202
 
@@ -164,14 +174,24 @@ class GradingJobs:
                 if self.row(conn, 'classes', assignment['class_id'])['archived']:
                     abort(409, description='班级已归档，请恢复后再批改。')
                 job = conn.execute("SELECT * FROM grading_jobs WHERE assignment_id=? AND state IN ('queued','running','interrupted') ORDER BY id DESC LIMIT 1", (assignment_id,)).fetchone()
-                ids = photo_ids if photo_ids is not None else [p[0] for p in conn.execute('SELECT id FROM batch_photos WHERE assignment_id=? AND excluded=0 ORDER BY id', (assignment_id,))]
-                if not ids:
+                ids = ([] if (options or {}).get('ai_review_only') else photo_ids if photo_ids is not None else
+                       [p[0] for p in conn.execute('SELECT id FROM batch_photos WHERE assignment_id=? AND excluded=0 ORDER BY id', (assignment_id,))])
+                if not ids and not (options or {}).get('ai_review_only'):
                     abort(400, description='请先上传未排除的作业照片。')
                 if self.tenant_mode and any(self.row(conn, 'batch_photos', pid)['assignment_id'] != assignment_id for pid in ids):
                     abort(404, description='照片不属于本次作业。')
                 if job and not set(ids) <= set(json.loads(job['photo_ids'])):
                     abort(409, description='本班已有后台任务，请等待完成后再处理这些照片。')
                 stage, grades = 'identifying', []
+                if (options or {}).get('ai_review_only'):
+                    if job:
+                        return self.dto(job)
+                    stage, ids = 'ai_review', []
+                    grades = [r[0] for r in conn.execute('''SELECT s.id FROM submissions s
+                        JOIN assignment_students ast ON ast.id=s.assignment_student_id
+                        WHERE ast.assignment_id=? ORDER BY s.id''', (assignment_id,))]
+                    if any(active_submission_job(conn, sid) for sid in grades):
+                        abort(409, description='本作业仍有后台任务，请完成后重试。')
             if not job:
                 created = self.stamp()
                 values = (assignment_id,submission_id,json.dumps(options or {}),stage,json.dumps(ids),json.dumps(grades),len(grades or ids),created,created)
@@ -234,7 +254,7 @@ class GradingJobs:
             return False
         job = None
         try:
-            with (self.app.app_context() if self.tenant_mode else nullcontext()):
+            with self.app.app_context():
                 with self.db() as conn:
                     found = conn.execute('''SELECT j.* FROM grading_jobs j WHERE j.state IN ('queued','running')
                     AND NOT EXISTS(SELECT 1 FROM assignments a JOIN classes c ON c.id=a.class_id
@@ -268,6 +288,8 @@ class GradingJobs:
                     self.identify(job)
                 elif job['stage'] == 'matching':
                     self.match(job)
+                elif job['stage'] == 'ai_review':
+                    self.ai_review(job)
                 else:
                     self.grade(job)
             return True
@@ -328,6 +350,10 @@ class GradingJobs:
         ids = json.loads(job['grade_ids'])
         cursor = job['grade_cursor']
         if cursor == len(ids):
+            if self.app.extensions['read_ai_review']()['enabled']:
+                self.save(job, stage='ai_review', completed=0, total=len(ids),
+                          message='正在 AI 复核不确定题，完成后再交给教师。')
+                return
             self.save(job, state='done', completed=len(ids), message='后台批改完成，请核对异常。' if json.loads(job['errors']) else '后台批改完成。')
             prepare = self.app.extensions.get('prepare_visual_suggestions')
             if prepare:
@@ -343,3 +369,32 @@ class GradingJobs:
             self.error(job, '答卷批改失败，已有记录已保留，请教师核对或重试。', submission_id=sid)
         self.save(job, grade_cursor=cursor+1, completed=cursor+1, total=len(ids), errors=job['errors'],
                   message=f'已处理 {cursor+1}/{len(ids)} 份答卷。')
+
+    def ai_review(self, job):
+        options = json.loads(job['options'])
+        ids = json.loads(job['grade_ids'])
+        cursor = options.get('ai_cursor', 0)
+        config = self.app.extensions['read_ai_review']()
+        limit = options.setdefault('ai_limit', config['limit'])
+        used, resolved = options.get('ai_used', 0), options.get('ai_resolved', 0)
+        if options.get('ai_reserved'):
+            self.save(job, state='done', message='上次 AI 请求中断，已停止自动重试以避免重复计费；剩余题请教师核对。')
+            return
+        if cursor >= len(ids) or not config['enabled'] or used >= limit:
+            reasons = '；'.join(f'{reason} {count} 题' for reason,count in options.get('ai_skipped', {}).items())
+            message = (f'AI 复核结束：调用 {used} 题，自动解决 {resolved} 题。' if used else
+                       '未调用 AI：没有符合安全复核条件的题目。')
+            if not config['enabled']:
+                message = 'AI 自动复核已关闭。' + (f'此前已调用 {used} 题。' if used else '')
+            self.save(job, state='done', message=message + (f'未自动解决：{reasons}。' if reasons else '') + '剩余异常请对照原图核对。')
+            return
+        # Reserve the budget before calling a paid provider; interruption never repeats a charge.
+        self.save(job, options=json.dumps(dict(options, ai_reserved=True)),
+                  message=f'正在本机补定位并复核第 {cursor+1}/{len(ids)} 份答卷；首次加载定位模型可能较慢。')
+        count, accepted, skipped = self.app.extensions['automatic_ai_review'](ids[cursor], job['id'], limit - used)
+        totals = options.setdefault('ai_skipped', {})
+        for reason, amount in skipped.items():
+            totals[reason] = totals.get(reason, 0) + amount
+        options.update(ai_cursor=cursor+1, ai_used=used+count, ai_resolved=resolved+accepted)
+        self.save(job, options=json.dumps(options), completed=cursor+1, total=len(ids),
+                  message=f'AI 已尝试 {used+count} 题，自动解决 {resolved+accepted} 题。')

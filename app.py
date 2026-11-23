@@ -336,10 +336,10 @@ def create_app(config=None):
                 return
             if not getattr(g, 'teacher_id', None):
                 fail('此账号不能进入教学工作台。', 403)
-            if request.path == '/settings':
+            if request.path == '/settings' and app.config.get('PRODUCTION_MODE'):
                 fail('识别服务由平台统一配置。', 403)
             enabled = {'index', 'list_classes', 'create_class', 'get_class', 'update_class',
-                       'list_tasks', 'new_task', 'get_task', 'new_submission', 'upload', 'create_assignments',
+                       'list_tasks', 'import_word', 'new_task', 'get_task', 'new_submission', 'upload', 'create_assignments',
                        'create_member', 'update_member', 'transfer_member', 'import_members',
                        'search_students', 'get_student', 'update_student', 'get_assignment',
                        'save_answer_card_format', 'set_assignment_archive', 'append_assignment_student',
@@ -352,11 +352,14 @@ def create_app(config=None):
                        'assignment_attention', 'task_attention', 'save_review', 'undo_quick_review',
                        'suggestions', 'extract_answers', 'acknowledge_page', 'report', 'history',
                        'get_grading_job', 'latest_grading_job', 'start_grading_job', 'process_photo',
-                       'submission_job', 'start_submission_job', 'resume_grading_job', 'auto_grade',
+                       'submission_job', 'start_submission_job', 'resume_grading_job', 'auto_grade', 'start_ai_review_job',
                        'run_ocr', 'visual_reread', 'visual_suggestion_image',
                        'deletion_preview', 'delete_task',
                        'class_analysis_json', 'class_analysis_page', 'memories', 'candidates',
                        'import_memory', 'update_memory'}
+            if not app.config.get('PRODUCTION_MODE'):
+                enabled.update(('get_settings', 'update_settings', 'test_settings',
+                                'get_ai_review_settings', 'update_ai_review_settings', 'test_ai_review_settings'))
             if request.endpoint not in enabled:
                 fail('此功能的教师数据隔离尚未完成。', 403)
 
@@ -618,6 +621,7 @@ def create_app(config=None):
     def index(record_id=None):
         return render_template('index.html', csrf_token=teacher_auth.csrf_token(app),
                                teacher_login_enabled=teacher_auth.auth_required(app),
+                               settings_available=not app.config.get('PRODUCTION_MODE'),
                                tenant_mode=tenant_mode, teacher_name=getattr(g, 'teacher_name', ''))
 
     @app.get('/api/health')
@@ -902,38 +906,44 @@ def create_app(config=None):
         return (box[0] < other[2] and box[2] > other[0]
                 and box[1] < other[3] and box[3] > other[1])
 
-    def automatic_visual_crop(detail, question):
+    def automatic_visual_crop(detail, question, rejected=None):
+        def skip(reason):
+            if rejected is not None:
+                rejected.append(reason)
+            return None
         evidence = question['auto_result'] or {}
         regions = evidence.get('regions', [])
         if (not question['uncertain'] or question['teacher_edited']
                 or question['kind'] not in ('word', 'phrase', 'grammar')
-                or evidence.get('source') != 'region_supplementary_ocr' or not regions):
-            return None
+                or evidence.get('source') not in ('region_supplementary_ocr', 'localization_ocr') or not regions):
+            return skip('缺少可靠的单题局部区域')
         pid = regions[0]['page_id']
         page = next((p for p in detail['pages'] if p['id'] == pid), None)
         if not page or page['status'] != 'done' or any(r['page_id'] != pid for r in regions):
-            return None
+            return skip('照片未完成或区域跨页')
         box = [math.floor(min(r['box'][i] for r in regions)) if i < 2
                else math.ceil(max(r['box'][i] for r in regions)) for i in range(4)]
         x0, y0, x1, y1 = box
         width, height = page['width'], page['height']
         angle = page['display_rotation']
         if not (0 <= x0 < x1 <= width and 0 <= y0 < y1 <= height):
-            return None
+            return skip('裁图坐标超出原图')
         top, page_height = {0:(y0,height),90:(width-x1,width),180:(height-y1,height),
                             270:(x0,width)}[angle]
         area = (x1-x0)*(y1-y0)
-        if top < page_height*.08 or area > min(2_000_000, width*height*.15):
-            return None
+        if area > min(2_000_000, width*height*.15):
+            return skip('裁图过大，可能包含多题')
+        if top < page_height*.08:
+            return skip('裁图靠近身份信息区')
         if any(r['page_id'] == pid and visual_overlaps(box, r['box'])
                for other in detail['reviews'] if other['question_id'] != question['question_id']
                for r in other['regions']):
-            return None
+            return skip('裁图与其他题目重叠')
         # Approximate OCR boxes containing identity text disqualify an otherwise usable crop.
         if any((re.search(r'学号|姓名|学生编号|班级|[\u3400-\u9fff]', b['text'])
                 or re.fullmatch(r'\s*\d{5,20}\s*', b['text']))
                and visual_overlaps(box, b['box']) for b in page['blocks']):
-            return None
+            return skip('裁图可能包含身份信息')
         return {'page_id': pid, 'box': box, 'rotation': angle}
 
     def prepare_visual_suggestions(submission_ids):
@@ -968,6 +978,60 @@ def create_app(config=None):
 
     app.extensions['prepare_visual_suggestions'] = prepare_visual_suggestions
 
+    def automatic_ai_review(sid, job_id, budget):
+        """Reuse the crop and version guards; keep model decisions separate from teacher edits."""
+        used = resolved = 0
+        skipped = {}
+        def skip(reason):
+            skipped[reason] = skipped.get(reason, 0) + 1
+        with db() as conn:
+            detail = submission_detail(conn, sid)
+            page_revision = review_page_revision(conn, sid)
+            image_paths = {p['id']: uploads/row(conn,'pages',p['id'])['image'] for p in detail['pages']}
+            attempted = {(r['question_id'], r['page_id']) for r in conn.execute(
+                'SELECT question_id,page_id FROM automatic_visual_attempts WHERE submission_id=?', (sid,))}
+        localization = None
+        localization_unavailable = False
+        if any(q['uncertain'] and not q['teacher_edited'] and not automatic_visual_crop(detail,q) for q in detail['reviews']):
+            from ai_localization import offline_blocks, localized_detail
+            try:
+                blocks = offline_blocks(detail, image_paths)
+                localization = dict(blocks=blocks, page_revision=page_revision,
+                                    signatures={q['question_id']: dumps(q) for q in detail['reviews']})
+                detail = localized_detail(detail, blocks)
+            except (ImportError, ValueError, OSError, RuntimeError):
+                # Optional cached models may be absent on a container; never fall back to a paid OCR call.
+                app.logger.warning('Offline review localization unavailable for submission %s',sid)
+                localization_unavailable = True
+        for question in detail['reviews']:
+            if not question['uncertain']:
+                continue
+            reasons = []
+            crop = automatic_visual_crop(detail, question, reasons)
+            if not crop:
+                skip(reasons[0] + ('（本机精确定位暂不可用）' if localization_unavailable else ''))
+                continue
+            if (question['question_id'], crop['page_id']) in attempted:
+                skip('本题已尝试自动复核')
+                continue
+            if used >= budget:
+                skip('达到本次调用上限')
+                continue
+            response = teacher_auth.internal_post(app,
+                f"/api/submissions/{sid}/reviews/{question['question_id']}/visual-reread", crop,
+                owner_id=g.teacher_id if tenant_mode else None,
+                environ={'moxieben.automatic_visual': True, 'moxieben.ai_review_job': job_id,
+                         'moxieben.ai_localization': localization})
+            used += 1
+            if response.status_code == 200 and response.json.get('applied'):
+                resolved += 1
+            else:
+                skip('接口未取得有效结果' if response.status_code == 502 else
+                     '两次识别未能相互印证' if response.status_code == 200 else '答卷状态变化或不符合复核条件')
+        return used, resolved, skipped
+
+    app.extensions['automatic_ai_review'] = automatic_ai_review
+
     @app.get('/api/submissions/<int:sid>/visual-suggestions/<int:vid>/image')
     def visual_suggestion_image(sid, vid):
         with db() as conn:
@@ -991,6 +1055,7 @@ def create_app(config=None):
         from settings import reread_handwriting, visual_review_config
 
         automatic = request.environ.get('moxieben.automatic_visual') is True
+        ai_job = request.environ.get('moxieben.ai_review_job') if automatic else None
         payload = body()
         if set(payload) - {'page_id', 'box', 'rotation'}:
             fail('只接受照片编号、原图框选坐标和旋转方向。')
@@ -1004,6 +1069,21 @@ def create_app(config=None):
 
         def current(conn):
             detail = submission_detail(conn, sid)
+            localization = request.environ.get('moxieben.ai_localization') if ai_job else None
+            if localization:
+                original = next((q for q in detail['reviews'] if q['question_id'] == qid), None)
+                if (review_page_revision(conn,sid) != localization['page_revision'] or original is None
+                        or dumps(original) != localization['signatures'].get(qid)):
+                    fail('答卷已更新，补定位结果已失效。',409)
+                from ai_localization import localized_detail
+                detail = localized_detail(detail,localization['blocks'])
+            if ai_job:
+                if not app.extensions['read_ai_review']()['enabled']:
+                    fail('AI 自动复核已关闭。', 409)
+                job = row(conn, 'grading_jobs', ai_job)
+                if (job['state'] != 'running' or job['stage'] != 'ai_review'
+                        or sid not in json.loads(job['grade_ids'])):
+                    fail('AI 复核任务状态已变化。', 409)
             question = next((q for q in detail['reviews'] if q['question_id'] == qid), None)
             page = next((p for p in detail['pages'] if p['id'] == pid), None)
             if question is None or page is None:
@@ -1011,9 +1091,10 @@ def create_app(config=None):
             if ((detail.get('identity') or {}).get('class_archived')
                     or (detail.get('identity') or {}).get('exempt')
                     or detail['grading_state'] != 'final' or page['status'] != 'done'
-                    or (detail.get('processing_job') or {}).get('state') in ('running', 'queued')
+                    or ((detail.get('processing_job') or {}).get('state') in ('running', 'queued')
+                        and (detail.get('processing_job') or {}).get('id') != ai_job)
                     or any(p['status'] == 'running' for p in detail['pages'])
-                    or not question['uncertain'] or question['teacher_edited']
+                    or not question['uncertain'] or question['teacher_edited'] or question['confirmed']
                     or question['kind'] not in ('word', 'phrase', 'grammar')):
                 fail('只支持尚未核对的短答识别异常。', 409)
             revision = visual_revision(detail, question, review_page_revision(conn, sid))
@@ -1032,7 +1113,9 @@ def create_app(config=None):
         if area > 2_000_000 or area * 3 > page['width'] * page['height']:
             fail('框选区域过大，请缩小到单题作答处。')
         try:
-            config = visual_review_config()
+            config = app.extensions['read_ai_review']() if ai_job else visual_review_config()
+            if ai_job and not config['enabled']:
+                fail('AI 自动复核已关闭。', 409)
         except ValueError as error:
             fail(str(error), 503)
         if not visual_reread_lock.acquire(blocking=False):
@@ -1064,7 +1147,7 @@ def create_app(config=None):
                 match = compare(result['transcript'], question['answer'], question['variants'])
                 score = question['points'] if match['matched'] else 0
             evidence = question['auto_result'] or {}
-            same_reading = (score is not None and evidence.get('source') == 'region_supplementary_ocr'
+            same_reading = (score is not None and evidence.get('source') in ('region_supplementary_ocr', 'localization_ocr')
                             and normalize(evidence['transcript']) == normalize(result['transcript']))
             regions = evidence.get('regions', [])
             # Broad boxes or another page cannot corroborate the teacher's selected crop.
@@ -1090,6 +1173,21 @@ def create_app(config=None):
                 vid = conn.execute('''INSERT INTO visual_suggestions
                     (submission_id,question_id,page_id,revision,created_at,result) VALUES (?,?,?,?,?,?)''',
                     (sid,qid,pid,revision,now(),dumps(saved))).lastrowid
+                if ai_job and saved['can_adopt']:
+                    before = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?', (sid,qid)).fetchone())
+                    event_id = conn.execute('INSERT INTO review_events(submission_id,question_id,created_at,snapshot) VALUES(?,?,?,?)',
+                                            (sid,qid,now(),'{}')).lastrowid
+                    decision = dict(evidence, uncertain=False, transcript=result['transcript'],
+                                    ai_review=dict(model=config['model'], suggestion_id=vid, event_id=event_id,
+                                                   original=evidence, crop=saved['crop']))
+                    conn.execute('UPDATE reviews SET transcript=?,auto_result=? WHERE submission_id=? AND question_id=?',
+                                 (result['transcript'],dumps(decision),sid,qid))
+                    after = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?', (sid,qid)).fetchone())
+                    conn.execute('UPDATE review_events SET snapshot=? WHERE id=?',
+                        (dumps(dict(action='automatic_ai_review', before=before, review_after=after,
+                                    page_revision=review_page_revision(conn,sid), rules=RULES)),event_id))
+                    conn.execute('UPDATE submissions SET updated_at=? WHERE id=?', (now(),sid))
+                    return jsonify(applied=True)
                 return jsonify(visual_suggestion_dto(row(conn, 'visual_suggestions', vid)))
         finally:
             visual_reread_lock.release()
@@ -1199,8 +1297,10 @@ def create_app(config=None):
                 fail('答卷正在处理，请完成后再撤销。',409)
             snapshot=json.loads(event['snapshot'])
             latest=conn.execute('SELECT MAX(id) FROM review_events WHERE submission_id=?',(sid,)).fetchone()[0]
+            if snapshot.get('action') == 'automatic_ai_review':
+                latest=conn.execute('SELECT MAX(id) FROM review_events WHERE submission_id=? AND question_id=?',(sid,qid)).fetchone()[0]
             current=dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?',(sid,qid)).fetchone())
-            if (snapshot.get('action') not in ('teacher_quick_decision', 'teacher_visual_adoption') or latest!=event_id
+            if (snapshot.get('action') not in ('teacher_quick_decision', 'teacher_visual_adoption', 'automatic_ai_review') or latest!=event_id
                     or snapshot.get('review_after')!=current or snapshot.get('page_revision')!=review_page_revision(conn,sid)):
                 fail('这份答卷已有后续修改或识别，不能撤销旧操作。请打开本题核对后改判。',409)
             previous=snapshot['before']
@@ -1210,7 +1310,7 @@ def create_app(config=None):
             stamp=now()
             conn.execute('UPDATE submissions SET updated_at=? WHERE id=?',(stamp,sid))
             conn.execute('INSERT INTO review_events(submission_id,question_id,created_at,snapshot) VALUES(?,?,?,?)',
-                (sid,qid,stamp,dumps({'action':'undo_teacher_quick_decision','undone_event_id':event_id,'before':current,'after':previous,'rules':RULES})))
+                (sid,qid,stamp,dumps({'action':'undo_automatic_ai_review' if snapshot.get('action') == 'automatic_ai_review' else 'undo_teacher_quick_decision','undone_event_id':event_id,'before':current,'after':previous,'rules':RULES})))
             return jsonify(submission_detail(conn,sid))
 
     @app.get('/api/submissions/<int:sid>/suggestions')
