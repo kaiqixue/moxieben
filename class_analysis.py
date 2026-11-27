@@ -34,17 +34,20 @@ def register(app, db, row, submission_summaries):
                 student['state']='exempt'
                 continue
             counts['expected']+=1
-            if not detail or not detail['is_final'] or state not in ('completed','uncertain'):
+            translation = bool(detail and any(q.get('scoring_mode') == 'translation' or q['kind'] in ('summary_cloze','summary','essay') for q in detail['reviews']))
+            if not detail or state not in ('completed','uncertain','ungraded') or (
+                    not detail['is_final'] and detail['grading_state'] != 'final' and not translation):
                 counts[state if state in ('not_uploaded','processing','failed') else 'ungraded']+=1
                 continue
-            counts['final']+=1
+            counts['ungraded']+=int(not detail['is_final'])
+            counts['final']+=int(detail['is_final'])
             for review in detail['reviews']:
                 q=questions[review['question_id']]
                 item={k:review[k] for k in ('question_id','number','kind','context','answer','variants','points','score','transcript')}
                 item['source']='教师已核对' if review['confirmed'] else '机器批改'
                 item['answer_status']=('blank' if review['confirmed_blank'] else 'text' if normalize(review['transcript']) else
                                        'teacher_verdict' if review['confirmed'] else 'missing')
-                if review['uncertain'] or not review['graded']:
+                if review['uncertain'] or not review['graded'] or review['score'] is None:
                     q['pending_count']+=1
                     item['reason']=(review['auto_result'] or {}).get('reason') or '尚未取得明确识别结果'
                     student['pending'].append(item)

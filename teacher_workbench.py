@@ -53,7 +53,7 @@ def processing_identity_photo_ids(conn, assignment_ids):
         JOIN json_each(j.photo_ids) ids ON ids.value=p.id
         LEFT JOIN assignment_students s ON s.id=p.suggested_student_id
         WHERE p.assignment_id IN ({','.join('?' for _ in assignment_ids)})
-        AND j.state IN ('queued','running') AND j.stage IN ('identifying','matching')
+        AND j.state IN ('queued','running') AND j.stage IN ('identifying','matching','identity_review')
         AND p.submission_id IS NULL AND p.excluded=0 AND COALESCE(s.exempt,0)=0''', assignment_ids)}
 
 
@@ -131,7 +131,7 @@ def attention_snapshot(conn, assignment_ids, submissions, include_items=False):
             sid = detail['id']
             if attention['failed']:
                 item('grading_failed', identity, sid, reason=detail['grading_error'] or '照片识别或批改失败，请重试。')
-            elif attention['ungraded']:
+            elif attention['ungraded'] and not attention['uncertain']:
                 item('ungraded', identity, sid, reason='答卷尚未完成计分。')
             if attention['uncertain']:
                 for question in detail['reviews']:

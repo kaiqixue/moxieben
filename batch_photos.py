@@ -14,6 +14,7 @@ from ocr_engine import recognize_identity as recognize
 from identity_matching import identity_evidence, primary_candidates, candidate_key, difference_text
 import student_id_band
 import name_memory
+import identity_review
 from teacher_workbench import processing_identity_photo_ids
 
 IMAGE_LIMIT = 10 * 1024 * 1024
@@ -51,6 +52,10 @@ def migrate(database):
         conn.execute('''CREATE UNIQUE INDEX IF NOT EXISTS batch_photo_upload_receipt
                         ON batch_photos(assignment_id, upload_id) WHERE upload_id IS NOT NULL''')
         conn.execute("UPDATE batch_photos SET status='error', error='上次身份识别被中断，请重试。' WHERE status='identifying'")
+        for record in conn.execute("SELECT id,ocr_result FROM batch_photos WHERE json_extract(ocr_result,'$.identity_review.status')='requesting'").fetchall():
+            result=json.loads(record[1])
+            result['identity_review'].update(status='unknown',reason='上次请求被中断，模型是否完成未知；不会自动重复调用，可人工核对或明确重试。')
+            conn.execute('UPDATE batch_photos SET ocr_result=? WHERE id=?',(json.dumps(result,ensure_ascii=False),record[0]))
 
 
 def _json(value):
@@ -78,6 +83,11 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
         item['match_details'] = json.loads(item.get('match_details') or '{}') or None
         item['suggested_student_id'] = item.get('suggested_student_id')
         item['identity_names'] = identity_evidence(item['blocks'],[])['names']
+        item['identity_codes'] = sorted(set(re.findall(r'(?:学号|编号|学籍号)\s*[:：]?\s*([A-Za-z0-9_-]{1,80})', item.get('identified_text',''))))
+        item['identity_review'] = json.loads(item.get('ocr_result') or '{}').get('identity_review')
+        if item['identity_review'] and (item['identity_review'].get('crop',{}).get('kind') in ('identity_labels','signature_header')
+                or item['identity_review'].get('crop',{}).get('rotation')):
+            item['identity_review']['crop']['url']=f"/api/batch-photos/{item['id']}/identity-review/image"
         item.pop('original', None)
         item.pop('image', None)
         item.pop('ocr_result', None)
@@ -125,7 +135,7 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
                 if not (detail.get('machine_graded_count') or detail.get('teacher_reviewed_count')):
                     item['score'] = None
                 if summary_only:
-                    for key in ('blocks','identified_text','candidates','identity_names','exclusion_history'):
+                    for key in ('blocks','identified_text','candidates','exclusion_history'):
                         item.pop(key,None)
                     item['evidence_loaded']=False
             photos.append(item)
@@ -135,7 +145,7 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
                  'processing_photos':len(processing),
                  'pending':sum(not p['submission_id'] and not p['excluded'] for p in photos),
                  'excluded':sum(bool(p['excluded']) for p in photos)}
-        for method in ('exact','band','memory','inferred','duplicate'):
+        for method in ('exact','band','memory','inferred','ai_identity','duplicate'):
             summary[method]=sum(not p['excluded'] and (p['match_details'] or {}).get('method')==method for p in photos)
         return {'photos':photos,'summary':summary,'linked_submission_ids':linked or []}
 
@@ -148,6 +158,10 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
         students=[s for s in assignment_students(conn,aid) if not s['exempt']]
         photos=[dict(p) for p in conn.execute("SELECT * FROM batch_photos WHERE assignment_id=? AND status='identified' AND submission_id IS NULL AND excluded=0 ORDER BY id",(aid,))]
         evidence={p['id']:photo_evidence(json.loads(p['blocks']),students,assignment) for p in photos}
+        for photo in photos:
+            review=json.loads(photo['ocr_result'] or '{}').get('identity_review')
+            if review and review.get('input_hash')==identity_review.snapshot_hash(photo,(uploads / photo['image']).read_bytes()):
+                evidence[photo['id']]=identity_review.reconcile(evidence[photo['id']],review,students)
         memories=name_memory.list_memories(conn,assignment['class_id'])
         memory_targets={}
         for pid,e in evidence.items():
@@ -176,6 +190,12 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
                     'observed_name':hits[0]['observed_name'],'differences':[], 'auto_eligible':False}]
                 e['name']=hits[0]['observed_name']
         used=occupied_students(conn,aid);linked=[];resolved=set();reserved=set()
+        for pid,e in evidence.items():
+            if e.get('method')=='ai_identity' and e.get('exact_id') and not (e.get('code') or e.get('ai_code')):
+                competing=any(other!=pid and any(c['id']==e['exact_id'] for c in primary_candidates(other_e['candidates']))
+                              for other,other_e in evidence.items())
+                if competing:
+                    e.update(blocked=True,exact_id=None,reason='多张待处理照片竞争同一学生，AI 姓名不能单独决定归属，请核对是否重复。')
         exact_groups={}
         for pid,e in evidence.items():
             if e['exact_id'] and not e['blocked']:
@@ -189,7 +209,7 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
                     resolved.add(pid)
                 continue
             pid=ids[0];e=evidence[pid]
-            details=(match_details(e,'band',e['reason']) if e.get('method')=='band'
+            details=(match_details(e,e['method'],e['reason']) if e.get('method') in ('band','ai_identity')
                      else match_details(e,'exact','学号或姓名唯一且无冲突，精确匹配。'))
             result=link_in_transaction(conn,pid,rid,'machine',details)
             linked.append(result['submission_id']);used.add(rid);resolved.add(pid)
@@ -356,6 +376,143 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
         with db() as conn:
             item = row(conn, 'batch_photos', pid)
         return send_file(uploads / item['image'], mimetype='image/png')
+
+    @app.post('/api/batch-photos/<int:pid>/identity-review')
+    def review_photo_identity(pid):
+        return run_identity_review(pid)
+
+    @app.post('/api/batch-photos/<int:pid>/identity-review/retry')
+    def retry_photo_identity(pid):
+        return run_identity_review(pid,retry=True)
+
+    @app.get('/api/batch-photos/<int:pid>/identity-review/image')
+    def identity_review_image(pid):
+        import io
+        with db() as conn:
+            photo=dict(row(conn,'batch_photos',pid))
+        review=json.loads(photo['ocr_result'] or '{}').get('identity_review') or {}
+        png,_=identity_review.identity_image((uploads/photo['image']).read_bytes(),json.loads(photo['blocks']),
+                                            signature=review.get('crop',{}).get('kind')=='signature_header',
+                                            rotation=review.get('crop',{}).get('rotation',0),
+                                            saved_crop=review.get('crop'))
+        return send_file(io.BytesIO(png),mimetype='image/png',max_age=0)
+
+    def run_identity_review(pid,retry=False):
+        import time
+        import settings
+        if request.get_json(silent=True) != {}:
+            fail('身份复读仅接受空 JSON 对象，不接受名单、提示词或答案。')
+        job_id=request.environ.get('moxieben.identity_review_job')
+        with db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            photo=dict(row(conn,'batch_photos',pid))
+            assignment=row(conn,'assignments',photo['assignment_id'])
+            klass=row(conn,'classes',assignment['class_id'])
+            if klass['archived']:
+                fail('班级已归档，请恢复后再复读身份。',409)
+            active=conn.execute("SELECT * FROM grading_jobs WHERE assignment_id=? AND state IN ('queued','running')",(photo['assignment_id'],)).fetchone()
+            if job_id:
+                if not active or active['id']!=job_id or active['stage']!='identity_review' or pid not in json.loads(active['photo_ids']):
+                    fail('身份复读任务与照片不一致。',409)
+            elif active:
+                fail('后台任务正在处理本班照片，请等待完成。',409)
+            raw=(uploads / photo['image']).read_bytes()
+            input_hash=identity_review.snapshot_hash(photo,raw)
+            ocr=json.loads(photo['ocr_result'] or '{}')
+            prior=ocr.get('identity_review')
+            if not retry and prior and prior.get('input_hash')==input_hash:
+                return jsonify(photo_dict(photo))
+            if photo['excluded'] or photo['submission_id'] or photo['status']!='identified':
+                fail('仅可复读已完成识别、尚未关联且未排除的照片。',409)
+            if prior and prior.get('status')=='requesting':
+                fail('AI 正在复核身份，请等待完成；不会重复请求。',409)
+            if retry and (not prior or prior.get('status') not in ('error','unknown','inconclusive','completed')):
+                fail('没有可重试的身份复读记录。',409)
+            config=settings.read_ai_review(db)
+            if job_id and not config.get('enabled') and not json.loads(active['options']).get('identity_review_only'):
+                fail('自动 AI 身份复读已关闭，本次不会请求模型。',409)
+            if not all(config.get(k) for k in ('base_url','model','api_key')):
+                fail('AI 地址、模型或 API Key 未配置完整，请先保存设置。',400)
+            ocr_raw=ocr.get('raw') or {}
+            pruned=ocr_raw.get('pruned_result',ocr_raw) if isinstance(ocr_raw,dict) else {}
+            preprocessor=pruned.get('doc_preprocessor_res') if isinstance(pruned,dict) else None
+            rotation=preprocessor.get('angle',0) if isinstance(preprocessor,dict) else 0
+            students=[s for s in assignment_students(conn,photo['assignment_id']) if not s['exempt']]
+            original_evidence=photo_evidence(json.loads(photo['blocks']),students,assignment)
+            used=occupied_students(conn,photo['assignment_id'])
+            png,crop=identity_review.identity_image(raw,json.loads(photo['blocks']),rotation=rotation)
+            review=dict(status='requesting',reason='身份复读请求已发出；若处理中断，不会自动重复计费，请人工核对。',
+                        read_name='',read_code='',read_class='',confidence='unreadable',model=config['model'],crop=crop,
+                        input_hash=input_hash,created_at=stamp(),elapsed_ms=None)
+            review['request_id']=uuid4().hex
+            if prior:
+                review['history']=prior.get('history',[])+[{k:v for k,v in prior.items() if k!='history'}]
+            ocr['identity_review']=review
+            conn.execute('UPDATE batch_photos SET ocr_result=?,updated_at=? WHERE id=?',(_json(ocr),stamp(),pid))
+        started=time.monotonic()
+        status=200
+        try:
+            result=identity_review.transcribe(config,png)
+            review['views']=[dict(result=result,crop=crop)]
+            if crop['kind']=='full_page' and (result['confidence']!='high' or not (result['name'] or result['student_code'])):
+                detail,detail_crop=identity_review.identity_image(raw,json.loads(photo['blocks']),signature=True,rotation=rotation)
+                reread=identity_review.transcribe(config,detail)
+                review['views'].append(dict(result=reread,crop=detail_crop))
+                if reread['name'] or reread['student_code']:
+                    conflict=any(result[k] and reread[k] and result[k]!=reread[k] for k in ('name','student_code','class_name'))
+                    result={k:reread[k] or result[k] for k in ('name','student_code','class_name')} | {
+                        'confidence':'low' if conflict else reread['confidence']}
+                    review['crop']=detail_crop
+            review.update(read_name=result['name'],read_code=result['student_code'],read_class=result['class_name'],confidence=result['confidence'])
+            conclusive=result['confidence']=='high' and bool(result['name'] or result['student_code'])
+            review.update(status='completed' if conclusive else 'inconclusive',
+                          reason='已复读身份原文，须经本班名单与原始证据核对。' if conclusive else '身份文字不清或证据不足，仅供人工核对。')
+            if any(v['result'].get('class_name') and v['result']['class_name']!=klass['name'] for v in review['views']):
+                review.update(class_conflict=True,reason='AI 读到的班级与当前班级不一致，请人工核对。')
+            candidate=identity_review.verification_candidate(original_evidence,review,students)
+            if candidate and candidate['id'] not in used:
+                detail,detail_crop=identity_review.identity_image(raw,json.loads(photo['blocks']),signature=True,rotation=rotation)
+                verification=dict(status='requesting',candidate_id=candidate['id'],candidate_name=candidate['name'],
+                                  crop=detail_crop,created_at=stamp())
+                review['verification']=verification
+                try:
+                    verification.update(result=identity_review.verify_candidate(config,detail,candidate['name']),status='completed')
+                except Exception as exc:
+                    verification.update(status='error',error_code=settings.visual_error_code(exc))
+                verification['completed_at']=stamp()
+                review['crop']=detail_crop
+                if verification.get('result',{}).get('decision')=='match' and verification['result'].get('confidence')=='high':
+                    review.update(status='completed',reason='签名候选核验已完成，须经本班唯一性与照片冲突检查。')
+                elif verification['status']=='error':
+                    review['reason']='自由复读已保留，签名候选核验失败，交由教师确认。'
+        except Exception as exc:
+            code=settings.visual_error_code(exc)
+            review.update(status='error',reason='AI 身份复读失败：'+settings.visual_error_message(code)+'。原图、OCR 与教师记录已保留。',error_code=code)
+            status=503
+        review.update(elapsed_ms=round((time.monotonic()-started)*1000),completed_at=stamp())
+        linked=[]
+        with db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current=dict(row(conn,'batch_photos',pid))
+            if identity_review.snapshot_hash(current,(uploads / current['image']).read_bytes())!=input_hash:
+                fail('照片身份信息已改变，本次复读未应用；请刷新核对。',409)
+            current_ocr=json.loads(current['ocr_result'] or '{}')
+            if current_ocr.get('identity_review',{}).get('request_id')!=review['request_id']:
+                fail('身份复读状态已改变，请刷新核对。',409)
+            current_ocr['identity_review']=review
+            conn.execute('UPDATE batch_photos SET ocr_result=?,updated_at=? WHERE id=?',(_json(current_ocr),stamp(),pid))
+            archived=row(conn,'classes',assignment['class_id'])['archived']
+            if status==200 and not job_id and not archived and not current['submission_id'] and not current['excluded']:
+                linked=match_in_transaction(conn,photo['assignment_id'])['linked_submission_ids']
+            saved=photo_dict(row(conn,'batch_photos',pid))
+        if linked:
+            runner=app.extensions['grading_jobs']
+            for sid in linked:
+                runner.enqueue(submission_id=sid,options={'reextract':True})
+            runner.kick()
+        if status!=200:
+            saved['error']=review['reason']
+        return jsonify(saved),status
 
     @app.post('/api/batch-photos/<int:pid>/exclude')
     def exclude_photo(pid):
@@ -534,7 +691,7 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
             conn.execute('BEGIN IMMEDIATE')
             photo=row(conn,'batch_photos',pid)
             details=json.loads(photo.get('match_details') or '{}')
-            if not photo['submission_id'] or details.get('method') not in ('inferred','memory','band','corrected'):
+            if not photo['submission_id'] or details.get('method') not in ('inferred','memory','band','ai_identity','corrected'):
                 fail('仅学号栏、姓名推断或纠错记忆关联的照片支持安全改选；原有人工归属不能覆盖。',409)
             original=row(conn,'submissions',photo['submission_id'])
             from grading_jobs import active_submission_job
@@ -542,7 +699,7 @@ def register_batch_routes(app, db, row, uploads, submission_detail, decode_photo
                 fail('答卷正在后台处理中，请结束后再改选。',409)
             if original['assignment_student_id']==rid:
                 return jsonify(submission_id=original['id'],page_id=photo['page_id'],photo=photo_dict(photo),submission=submission_detail(conn,original['id']))
-            if photo.get('identity_source')!='machine' or details.get('method') not in ('inferred','memory','band'):
+            if photo.get('identity_source')!='machine' or details.get('method') not in ('inferred','memory','band','ai_identity'):
                 fail('照片已由教师更正归属，不能再次自动覆盖。',409)
             assignment=row(conn,'assignments',photo['assignment_id'])
             if row(conn,'classes',assignment['class_id'])['archived']:

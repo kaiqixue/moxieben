@@ -18,15 +18,64 @@ const classHistoryAction = student => student.submission_id || student.id ? clas
 function identityMatchHTML(photo) {
   const details = photo.match_details;
   const method = details?.method;
-  const labels = {exact:['精确关联','blue'],band:[`学号栏匹配 · ${details?.identity_band?.code || ''}`,'blue'],memory:['教师纠错记忆 · 请核对','blue'],inferred:['推断关联 · 请核对','amber'],duplicate:['重复 / 已占用 · 待确认','amber'],pending:['待确认归属','amber'],manual:['教师确认','green'],corrected:['教师更正','green']};
+  const labels = {ai_identity:['AI 证据匹配 · 可更正','blue'],exact:['精确关联','blue'],band:[`学号栏匹配 · ${details?.identity_band?.code || ''}`,'blue'],memory:['教师纠错记忆 · 请核对','blue'],inferred:['推断关联 · 请核对','amber'],duplicate:['重复 / 已占用 · 待确认','amber'],pending:['待确认归属','amber'],manual:['教师确认','green'],corrected:['教师更正','green']};
   const label = labels[method];
   const band = details?.identity_band;
   const bandHTML = band ? `<details class="tiny"><summary>学号栏读数</summary>状态：${escapeHTML({valid:'有效',incomplete:'不完整',conflict:'冲突',template_mismatch:'模板不符',absent:'未读到'}[band.state] || band.state)}；读作“${escapeHTML(band.observed_suffix ?? '—')}”${band.code ? `，拼接为 ${escapeHTML(band.code)}` : ''}；模板 ${escapeHTML(band.format_code || '—')}${band.raw_text ? `<br>原文：${escapeHTML(band.raw_text)}` : ''}${details?.observed_name ? `<br>姓名线索：${escapeHTML(details.observed_name)}` : ''}</details>` : '';
   return `${label ? `<span class="badge ${label[1]}">${escapeHTML(label[0])}</span>` : ''}${details?.reason ? `<p class="notice ${method === 'inferred' || method === 'pending' || method === 'duplicate' ? 'warn' : ''}">${escapeHTML(details.reason)}</p>` : ''}${bandHTML}${method === 'memory' ? `<div class="tiny">记忆依据：${(details.source_photo_ids || []).map(id => `<a href="/api/batch-photos/${Number(id)}/image" target="_blank" rel="noreferrer">教师确认照片 #${Number(id)}</a>`).join('、')}</div>` : ''}`;
 }
 function inferredPhoto(photo) {
-  return !!photo?.submission_id && photo.identity_source === 'machine' && ['inferred','memory','band'].includes(photo.match_details?.method);
+  return !!photo?.submission_id && photo.identity_source === 'machine' && ['inferred','memory','band','ai_identity'].includes(photo.match_details?.method);
 }
+// Keep request uncertainty across polling; never resend an unknown POST automatically.
+const identityRequests = new Map();
+function identityEvidenceHTML(photo, reason = '', candidates = true) {
+  const r=photo.identity_review||{},local=identityRequests.get(photo.id)||{},busy=local.busy||r.status==='requesting';
+  const original=photo.url||`/api/batch-photos/${Number(photo.id)}/image`;
+  const crop=r.crop?.url,src=crop||original;
+  const names=(photo.identity_names||[]).join('、')||photo.match_details?.observed_name||'未读到';
+  const code=photo.identity_codes?.join('、')||photo.match_details?.identity_band?.code||photo.match_details?.identity_band?.observed_suffix||'未读到';
+  const status={requesting:'正在 AI 复核身份…',completed:'AI 复核已完成',inconclusive:'AI 无法确定身份',error:'AI 复核失败',unknown:'上次请求结果未知，可人工核对或明确重试'}[r.status]||'尚未 AI 复核';
+  const pending=!photo.submission_id&&!photo.excluded&&!photo.processing_identity;
+  const list=photo.match_details?.candidates||photo.candidates||[];
+  const best=list.filter(c=>!c.supplementary),other=list.filter(c=>c.supplementary);
+  const candidateRow=c=>{const occupied=c.already_matched||classUI.data?.students?.find(s=>s.id===c.id)?.submission_id;return `<div><button type="button" class="btn small" data-identity-confirm="${photo.id}" data-student-id="${Number(c.id)}" ${occupied||state.busy||local.unknown?'disabled':''}>确认 ${escapeHTML(c.student_code)} ${escapeHTML(c.name)}</button><span class="tiny muted">${occupied?'已有答卷，请用手动选择核验追加':c.differences?.length?c.differences.map(identityDifferenceHTML).join('；'):'候选仅供参考'}</span></div>`;};
+  const candidateHTML=`<strong>${best.length===1?'唯一最佳候选 · 证据不足时请确认':best.length?'同等最佳候选 · 核对原图后一键确认':'候选学生'}</strong>${best.length?best.map(candidateRow).join(''):'<p class="tiny muted">暂无可靠候选，可先 AI 复核，或手动选择学生。</p>'}${other.length?`<details class="identity-other-candidates"><summary>其他相近候选（${other.length}）· 证据较弱</summary>${other.map(candidateRow).join('')}</details>`:''}`;
+  const verification=r.verification,checked=verification?.result;
+  const verificationHTML=verification?`<p class="tiny"><strong>签名候选核验</strong>：${escapeHTML(verification.candidate_name||'')} · ${escapeHTML(verification.status==='error'?'核验失败，保留原复读':checked?.decision==='match'?(checked.confidence==='high'?'字形核验一致':'仍不确定'):checked?.decision==='none'?'与候选不符':'无法确认')}${checked?.evidence?`；${escapeHTML(checked.evidence)}`:''}</p>`:'';
+  return `<section class="identity-evidence" data-identity-evidence="${photo.id}" aria-label="照片身份依据"><a class="identity-original" href="${escapeHTML(original)}" target="_blank" rel="noreferrer"><img src="${escapeHTML(src)}" alt="照片 #${photo.id} ${crop?'身份区域':'原图'}，点击放大核对" loading="lazy"><span class="tiny">${crop?'身份区域 · 点击查看完整原图':'完整原图 · 点击放大核对姓名和学号'}</span></a><div class="identity-evidence-body"><dl class="identity-readings"><div><dt>原始 OCR</dt><dd>姓名：${escapeHTML(names)} · 学号：${escapeHTML(code)}</dd></div><div><dt>AI 重读</dt><dd>姓名：${escapeHTML(r.read_name||'—')} · 学号：${escapeHTML(r.read_code||'—')} · 班级：${escapeHTML(r.read_class||'—')}</dd></div></dl>${verificationHTML}<p class="notice warn">${escapeHTML(reason||photo.match_details?.reason||'尚无足够依据确认归属，请对照原图。')}</p><p class="tiny muted" role="status" aria-live="polite">${status}${r.reason?`：${escapeHTML(r.reason)}`:''}${r.model?` · ${escapeHTML(r.model)}`:''}${r.elapsed_ms!=null?` · ${numberText(r.elapsed_ms/1000)} 秒`:''}${r.crop?.kind?` · ${r.crop.kind==='signature_header'?'页首签名复核':r.crop.kind==='identity_labels'?'身份区域复核':'整页复核'}`:''}</p>${local.error?`<p class="notice error" role="alert">${escapeHTML(local.error)}</p>`:''}${pending?`<div class="button-row"><button type="button" class="btn small" data-identity-review="${photo.id}" ${busy||state.busy?'disabled':''} ${busy?'aria-busy="true"':''}>${busy?'正在复核…':local.unknown?'核对复核状态':r.status||local.retry?'重新 AI 复核身份':'AI复核身份'}</button>${candidates?`<button type="button" class="btn small" data-class-action="batch-confirm" data-id="${photo.id}">手动选择其他学生</button>`:''}</div>`:''}${pending&&candidates?`<div class="identity-inline-candidates">${candidateHTML}</div>`:''}</div></section>`;
+}
+function refreshIdentityEvidence(id) {
+  const photo=classUI.batchPhotos.find(p=>p.id===id);if(!photo)return;
+  $$(`[data-identity-evidence="${id}"]`).forEach(panel=>{const inForm=!!panel.closest('form');panel.outerHTML=identityEvidenceHTML(photo,'',!inForm);});
+}
+document.addEventListener('click',async event=>{
+  const button=event.target.closest('[data-identity-review],[data-identity-confirm]');if(!button||state.busy)return;
+  const id=Number(button.dataset.identityReview||button.dataset.identityConfirm),photo=classUI.batchPhotos.find(p=>p.id===id);if(!photo)return;
+  const version=state.routeVersion,local=identityRequests.get(id)||{};
+  state.busy=true;identityRequests.set(id,{...local,busy:true,error:''});refreshIdentityEvidence(id);
+  let saved=false;
+  try {
+    if(button.hasAttribute('data-identity-confirm')) {
+      const linked=await api(`/api/batch-photos/${id}/confirm`,{method:'POST',body:{assignment_student_id:Number(button.dataset.studentId),confirmed:true,remember_identity:false,observed_name:'',append_page:false,auto_grade:true}});
+      saved=true;if(version!==state.routeVersion)return;
+      Object.assign(photo,linked.photo||{},{submission_id:linked.submission_id});identityRequests.delete(id);
+      toast('归属已保存并交给后台批改。');
+      try {await classRefresh();}catch(error){identityRequests.set(id,{error:`归属已保存，名单读取失败：${error.message}。无需重复确认。`});}
+    } else {
+      const result=local.unknown?await api(`/api/batch-photos/${id}`):await api(`/api/batch-photos/${id}/identity-review${photo.identity_review||local.retry?'/retry':''}`,{method:'POST',body:{}});
+      if(version!==state.routeVersion)return;
+      Object.assign(photo,result.photo||result);identityRequests.delete(id);
+      if(!$('#class-dialog'))await classRefresh();
+    }
+  } catch(error) {
+    if(version!==state.routeVersion)return;
+    const unknown=!error.status;
+    identityRequests.set(id,{unknown,retry:error.status===503,error:saved?`归属已保存，后续读取失败：${error.message}`:unknown?`响应未确认：${error.message}。请先核对状态，不会自动重试。`:error.message});
+  } finally {
+    if(version===state.routeVersion){state.busy=false;const current=identityRequests.get(id);if(current)current.busy=false;refreshIdentityEvidence(id);if(!$('#class-dialog')&&classUI.attention)Workspace.attention(classUI.attention);}
+  }
+});
 function identityDifferenceHTML(d) {
   if (d.op === 'suffix') return `忽略姓名末尾数字（识别后缀：${escapeHTML(d.observed || '无')}；名单后缀：${escapeHTML(d.expected || '无')}）`;
   if (d.op === 'insert') return `第 ${Number(d.index)+1} 字处补入“${escapeHTML(d.expected)}”`;
@@ -82,7 +131,7 @@ function identityConfirmationHTML(photo, students, reassign = false) {
   const selected = !reassign && ['exact','duplicate'].includes(photo.match_details?.method) ? photo.suggested_student_id : null;
   const options = list => list.map(s => `<option value="${s.id}" ${s.id === selected ? 'selected' : ''} data-has-pages="${s.submission_id ? '1':'0'}">${escapeHTML(s.student_code)} ${escapeHTML(s.name)}${s.submission_id ? reassign ? '（已有答卷，需核验）' : '（追加到已有答卷）' : ''}</option>`).join('');
   const recommended = candidates.map(c => available.find(s => s.id === c.id)).filter(Boolean);
-  return `<a href="${escapeHTML(photo.url)}" target="_blank" rel="noreferrer"><img class="batch-preview" src="${escapeHTML(photo.url)}" alt="照片 #${photo.id} 原图，点击放大"></a><p class="batch-text">机器转录：${escapeHTML(photo.identified_text || '未识别到文字，仍可对照原图手动归属。')}</p>${identityMatchHTML(photo)}${reassign ? '<p class="notice warn">更正会将这张机器关联的照片移给所选学生，并重新批改；原学生恢复待交。已有教师修改、多页答卷或目标冲突时不能更正。</p>' : '<p class="tiny">请对照原图核对学号和姓名；候选只供参考。</p>'}${identityCandidatesHTML(candidates)}<label class="field">${reassign ? '更正到本次应交学生' : '本次应交学生'}<select name="assignment_student_id" required><option value="">请选择并核对编号、姓名</option>${recommended.length ? `<optgroup label="候选学生（请核对，不自动选择）">${options(recommended)}</optgroup><optgroup label="其余应交名单">${options(available.filter(s => !candidateIds.has(s.id)))}</optgroup>` : options(available)}</select></label>${!reassign ? '<label class="inline-check" data-append-confirm hidden><input type="checkbox" name="append_page" disabled>已核对：这不是重复照片，确为该学生的另一页；我确认追加到已有答卷</label>' : ''}${identityLearningHTML(photo)}<label class="inline-check"><input name="confirmed" type="checkbox" required>${reassign ? '我已核对原图，确认将照片移给所选学生并重新批改' : '我已对照原图核对学号和姓名，确认归属此学生'}</label>`;
+  return `<p class="batch-text">机器转录：${escapeHTML(photo.identified_text || '未识别到文字，仍可对照原图手动归属。')}</p>${identityMatchHTML(photo)}${identityEvidenceHTML(photo,'',false)}${reassign ? '<p class="notice warn">更正会将这张机器关联的照片移给所选学生，并重新批改；原学生恢复待交。已有教师修改、多页答卷或目标冲突时不能更正。</p>' : '<p class="tiny">请对照原图核对学号和姓名；候选只供参考。</p>'}${identityCandidatesHTML(candidates)}<label class="field">${reassign ? '更正到本次应交学生' : '本次应交学生'}<select name="assignment_student_id" required><option value="">请选择并核对编号、姓名</option>${recommended.length ? `<optgroup label="候选学生（请核对，不自动选择）">${options(recommended)}</optgroup><optgroup label="其余应交名单">${options(available.filter(s => !candidateIds.has(s.id)))}</optgroup>` : options(available)}</select></label>${!reassign ? '<label class="inline-check" data-append-confirm hidden><input type="checkbox" name="append_page" disabled>已核对：这不是重复照片，确为该学生的另一页；我确认追加到已有答卷</label>' : ''}${identityLearningHTML(photo)}<label class="inline-check"><input name="confirmed" type="checkbox" required>${reassign ? '我已核对原图，确认将照片移给所选学生并重新批改' : '我已对照原图核对学号和姓名，确认归属此学生'}</label>`;
 }
 
 function pendingIdentityPhotos() {
@@ -101,7 +150,7 @@ async function openBatchIdentity(id, reassign = false) {
     if (version!==state.routeVersion) return;
     classUI.batchPhotos=classUI.batchPhotos.map(p=>p.id===photo.id?photo:p);
   }
-  if (reassign && !inferredPhoto(photo)) throw new Error('只有学号栏匹配、姓名推断或纠错记忆关联的照片可以使用此更正入口。');
+  if (reassign && !inferredPhoto(photo)) throw new Error('只有机器推断、学号栏、AI 身份关联或纠错记忆关联的照片可以使用此更正入口。');
   if (!reassign && (photo.submission_id || photo.excluded || photo.processing_identity || photo.status==='identifying')) throw new Error('照片已关联、已排除或正在处理，请重新读取名单。');
   const next=!reassign && pendingIdentityPhotos().some(p=>p.id!==id);
   classDialog(`照片 #${photo.id} · ${reassign ? '更正机器归属' : '核对归属'}`, `<form id="${reassign ? 'class-batch-reassign' : 'class-batch-confirm'}" data-photo-id="${photo.id}" data-continue="${next ? '1':'0'}" class="form-grid" data-class-dirty>${identityConfirmationHTML(photo,classUI.data.students,reassign)}<button class="btn primary" type="submit">${reassign ? '确认更正并重新批改' : next ? '确认并下一张' : '确认归属并加入答卷'}</button></form>`);
@@ -292,7 +341,7 @@ function renderBatchPhotos() {
     const student = (photo.submission_id && classUI.data.students.find(s => s.submission_id === photo.submission_id)) || classUI.data.students.find(s => s.id === photo.suggested_student_id);
     const scoreHTML = photo.submission_id ? `<div class="batch-photo-score"><strong>${photo.score == null ? '尚未出成绩' : `${photo.is_final ? '最终成绩' : '暂定成绩'} ${numberText(photo.score)} / ${numberText(photo.total_points)}`}</strong>${photo.grading_source ? `<span class="muted tiny">${escapeHTML(photo.grading_source)}</span>` : ''}${recognitionHTML({...photo,id:photo.submission_id},'assignment')}</div>` : '';
     const evidence = `<a href="${escapeHTML(photo.url)}" target="_blank" rel="noreferrer"><img src="${escapeHTML(photo.url)}" alt="照片 #${photo.id} 原图" loading="lazy"></a><p class="batch-text">${escapeHTML(photo.evidence_loaded===false ? '展开后读取已保存的识别文字。' : photo.identified_text || '尚无识别文字。')}</p>`;
-    return `<article class="batch-photo" data-batch-photo="${photo.id}"><div><strong>照片 #${photo.id}</strong> <span class="muted tiny">${photo.answer_layout === 'separate' ? '独立答题卡' : '原文作答'}</span> <span class="badge ${photo.submission_id ? 'green' : 'amber'}">${labels[photo.status] || '待处理'}</span></div>${photo.submission_id && student ? `<a class="batch-student" href="/students/${student.student_id}" data-nav><span>关联学生</span><strong>${escapeHTML(student.name)}</strong><span>学号 ${escapeHTML(student.student_code)}</span></a>` : ''}${scoreHTML}${identityMatchHTML(photo)}${photo.submission_id ? `<details><summary>查看照片与识别原文</summary>${evidence}</details>` : evidence}${!photo.submission_id && student ? `<p class="tiny">建议核对：${escapeHTML(student.student_code)} ${escapeHTML(student.name)}</p>` : ''}${photo.error ? `<p class="notice error">${escapeHTML(photo.error)}</p>` : ''}<div class="button-row">${!photo.submission_id ? `<button class="btn small" data-class-action="batch-identify" data-id="${photo.id}" ${state.busy ? 'disabled' : ''}>${photo.status === "identified" ? "继续处理" : "重试识别"}</button><button class="btn small primary" data-class-action="batch-confirm" data-id="${photo.id}" ${state.busy ? 'disabled' : ''}>选择学生</button><button class="btn small" data-class-action="batch-exclude" data-id="${photo.id}">排除本张</button>` : classLink(`/submissions/${photo.submission_id}`,'查看成绩 / 改判 →')}${inferredPhoto(photo) ? `<button class="btn small" data-class-action="batch-reassign" data-id="${photo.id}" ${state.busy ? 'disabled' : ''}>更正机器归属</button>` : ''}</div></article>`;
+    return `<article class="batch-photo" data-batch-photo="${photo.id}"><div><strong>照片 #${photo.id}</strong> <span class="muted tiny">${photo.answer_layout === 'separate' ? '独立答题卡' : '原文作答'}</span> <span class="badge ${photo.submission_id ? 'green' : 'amber'}">${labels[photo.status] || '待处理'}</span></div>${photo.submission_id && student ? `<a class="batch-student" href="/students/${student.student_id}" data-nav><span>关联学生</span><strong>${escapeHTML(student.name)}</strong><span>学号 ${escapeHTML(student.student_code)}</span></a>` : ''}${scoreHTML}${identityMatchHTML(photo)}${!photo.submission_id?identityEvidenceHTML(photo):''}${photo.submission_id ? `<details><summary>查看照片与识别原文</summary>${evidence}</details>` : ''}${!photo.submission_id && student ? `<p class="tiny">建议核对：${escapeHTML(student.student_code)} ${escapeHTML(student.name)}</p>` : ''}${photo.error ? `<p class="notice error">${escapeHTML(photo.error)}</p>` : ''}<div class="button-row">${!photo.submission_id ? `<button class="btn small" data-class-action="batch-identify" data-id="${photo.id}" ${state.busy ? 'disabled' : ''}>${photo.status === "identified" ? "继续处理" : "重试识别"}</button><button class="btn small primary" data-class-action="batch-confirm" data-id="${photo.id}" ${state.busy ? 'disabled' : ''}>选择学生</button><button class="btn small" data-class-action="batch-exclude" data-id="${photo.id}">排除本张</button>` : classLink(`/submissions/${photo.submission_id}`,'查看成绩 / 改判 →')}${inferredPhoto(photo) ? `<button class="btn small" data-class-action="batch-reassign" data-id="${photo.id}" ${state.busy ? 'disabled' : ''}>更正机器归属</button>` : ''}</div></article>`;
   }).join('')}</div>` : '<span class="muted">尚未上传照片。</span>';
 }
 
@@ -330,7 +379,7 @@ function renderGradingJob(job) {
   const layout = $('#batch-answer-layout'); if (layout) layout.disabled = !!unfinished||state.busy;
   const start = $('[data-class-action=batch-start]');
   if (start) { start.disabled = !!active; start.textContent = active ? '后台处理中' : job && ['interrupted','failed'].includes(job.state) ? '继续后台批改' : '处理已上传照片'; }
-  panel.innerHTML = !job ? '<p class="tiny muted">照片上传结束后可离开页面；本机服务需保持运行。</p>' : `<div class="notice ${job.state === 'interrupted' || job.state === 'failed' ? 'warn' : ''}"><strong>${escapeHTML(({queued:'本批等待处理',running:'本批处理中',interrupted:'本批处理已中断',failed:'本批任务失败',done:'批改完成，查看成绩'})[job.state] || job.state)}</strong>${job.total ? ` · ${escapeHTML(({identifying:'识别学生',matching:'匹配名单',grading:'自动计分',ai_review:'AI 检查答卷（份）'})[job.stage] || '')} ${numberText(job.completed)} / ${numberText(job.total)}` : ''}<br>${job.state==='done'&&!job.total?'本次没有新增待批改答卷。全班完成情况见上方汇总。':escapeHTML(job.message)}${active ? '<br>可以离开本页面，本机服务开启时继续处理。' : ''}${job.state === 'interrupted' || job.state === 'failed' ? '<br>请先继续本次任务，结束后再上传新照片。' : ''}${job.errors?.length ? `<br>${job.errors.length} 项处理失败，原图已保留；可在全班异常中核对。` : ''}</div>`;
+  panel.innerHTML = !job ? '<p class="tiny muted">照片上传结束后可离开页面；本机服务需保持运行。</p>' : `<div class="notice ${job.ai_incomplete || job.errors?.length || job.state === 'interrupted' || job.state === 'failed' ? 'warn' : ''}"><strong>${escapeHTML(({queued:'本批等待处理',running:'本批处理中',interrupted:'本批处理已中断',failed:'本批任务失败',done:job.ai_incomplete?'AI 复核未完成，请查看原因':job.errors?.length?'本批处理结束，部分项目失败':'本批处理完成，查看成绩'})[job.state] || job.state)}</strong>${job.total ? ` · ${escapeHTML(({identifying:'识别学生',matching:'匹配名单',identity_review:'AI 复核归属（张）',grading:'自动计分',ai_review:'AI 检查答卷（份）'})[job.stage] || '')} ${numberText(job.completed)} / ${numberText(job.total)}` : ''}<br>${job.state==='done'&&!job.total?'本次没有新增待批改答卷。全班完成情况见上方汇总。':escapeHTML(job.message)}${active ? '<br>可以离开本页面，本机服务开启时继续处理。' : ''}${job.state === 'interrupted' || job.state === 'failed' ? '<br>请先继续本次任务，结束后再上传新照片。' : ''}${job.errors?.length ? `<br>${job.errors.length} 项处理失败，原图已保留；可在全班异常中核对。` : ''}</div>`;
   if(job?.state==='done')panel.insertAdjacentHTML('beforeend',`<a class="btn" data-nav href="/assignments/${classUI.data.id}?tab=grades">查看成绩</a>`);
   if(classUI.refreshPending)panel.insertAdjacentHTML('beforeend','<p class="tiny muted" role="status">批改进度已更新，结束当前操作后自动刷新名单。</p>');
   if(classUI.photoReadError)panel.insertAdjacentHTML('beforeend',`<p class="notice warn">照片列表暂时无法获取，正在重新读取；不必重复上传。${escapeHTML(classUI.photoReadError)}</p>`);
@@ -673,7 +722,10 @@ document.addEventListener('click', async event => {
   const action = button.dataset.classAction;
   if (!classBeforeReplace()) return;
   await classAction(button, async () => {
-    if (action === 'batch-ai-review') {
+    if (action === 'batch-identity-review') {
+      const data=await api(`/api/assignments/${classUI.data.id}/identity-review-jobs`,{method:'POST',body:{}});
+      renderGradingJob(data.job);await classRefresh();
+    } else if (action === 'batch-ai-review') {
       const data = await api(`/api/assignments/${classUI.data.id}/ai-review-jobs`, {method:'POST',body:{}});
       renderGradingJob(data.job);
       await classRefresh();

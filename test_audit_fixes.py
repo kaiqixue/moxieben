@@ -162,7 +162,13 @@ class AuditFlowTests(unittest.TestCase):
         self.photo()
         job = self.post(f'/api/assignments/{self.aid}/grading-jobs', {}).json['job']
         with self.db() as conn:
+            # Recreate the historical queue before translation child tables/triggers existed.
+            for trigger in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'translation_%'").fetchall():
+                conn.execute('DROP TRIGGER ' + trigger[0])
+            conn.execute('DROP TABLE IF EXISTS translation_ai_runs')
+            conn.execute('DROP TABLE IF EXISTS translation_rubrics')
             conn.execute('DROP INDEX one_active_submission_job')
+            conn.execute('ALTER TABLE grading_jobs DROP COLUMN task_id')
             conn.execute('ALTER TABLE grading_jobs DROP COLUMN submission_id')
             conn.execute('ALTER TABLE grading_jobs DROP COLUMN options')
         self.restart()

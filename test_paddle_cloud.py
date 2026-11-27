@@ -131,6 +131,7 @@ class PaddleCloudTests(unittest.TestCase):
         import paddle_cloud
         with patch('paddle_cloud.requests.post',return_value=self.response(status=401)), self.assertRaisesRegex(ValueError,'Token'):
             paddle_cloud.recognize(self.path,self.config)
+
         with patch('paddle_cloud.requests.post',return_value=self.response({'data':{'jobId':'j'}})), patch('paddle_cloud.requests.get',return_value=self.response({'data':{'state':'failed','errorMsg':self.config['paddle_token']}})):
             with self.assertRaises(ValueError) as caught: paddle_cloud.recognize(self.path,self.config)
         self.assertNotIn(self.config['paddle_token'],str(caught.exception))
@@ -138,6 +139,15 @@ class PaddleCloudTests(unittest.TestCase):
             paddle_cloud.recognize(self.path,self.config)
         with patch('paddle_cloud.requests.post',return_value=self.response({'data':{'jobId':'j'}})), patch('paddle_cloud.requests.get',return_value=self.response({'data':{'state':'unexpected'}})), self.assertRaisesRegex(ValueError,'状态'):
             paddle_cloud.recognize(self.path,self.config)
+
+    def test_http_400_reports_safe_provider_reason_without_echoing_response_secrets(self):
+        import paddle_cloud
+        for code,expected in [(10003,'文件大小'),(10007,'模型'),(10008,'参数'),(11002,'过期')]:
+            with self.subTest(code=code):
+                response=self.response({'code':code,'msg':'test-token private request'},status=400)
+                with self.assertRaisesRegex(ValueError,expected) as caught:paddle_cloud._check(response)
+                self.assertIn(str(code),str(caught.exception))
+                self.assertNotIn('test-token',str(caught.exception))
 
     def test_settings_separate_secrets_and_routes_use_paddle(self):
         app=create_app({'TESTING':True,'DATA_DIR':self.tmp.name,'CSRF_TOKEN':'test'})

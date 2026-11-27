@@ -271,7 +271,7 @@ def register(app, db, row, detail, suggestions, uploads, recognize, stamp, dumps
                         refresh_pages.add(page['id'])
             explicit=any(payload.get(k) for k in ('rerun','reextract','retry_missing'))
             old_decisions=any(not q['confirmed'] and (q['auto_result'] or {}).get('processing_version')!=PROCESSING_VERSION for q in current['reviews'])
-            if current['is_final'] and not explicit:
+            if current['grading_state'] == 'final' and not explicit:
                 if all(q['confirmed'] for q in current['reviews']) or (not refresh_pages and not old_decisions):
                     return jsonify(current)
                 # Recompute old decisions once from saved evidence; only a provider/model change needs OCR.

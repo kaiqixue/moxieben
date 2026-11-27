@@ -99,7 +99,7 @@ class AutoGradeTests(unittest.TestCase):
         self.seed(sid,page['id'],first)
         with patch('settings.recognize_selected',return_value={'blocks':second}) as cloud:
             result=self.grade(sid); self.assertEqual(cloud.call_count,1)
-        self.assertEqual(result['score'],5);self.assertEqual(result['uncertain_count'],1)
+        self.assertIsNone(result['score']);self.assertEqual(result['uncertain_count'],1)
         self.assertEqual(result['reviews'][0]['machine_text'],'recieve')
         self.assertEqual(result['reviews'][0]['transcript'],'receive')
         q=result['reviews'][0]
@@ -116,12 +116,12 @@ class AutoGradeTests(unittest.TestCase):
         self.assertEqual(after['reviews'][0]['score'],1)
         self.assertGreater(after['history_count'],result['history_count'])
 
-    def test_success_with_no_answers_final_zero_and_no_fake_blank(self):
+    def test_success_with_no_answers_stays_pending_and_no_fake_blank(self):
         task=self.create_task();sid=self.submission(task);self.image(sid)
         with patch('settings.recognize_selected',return_value={'blocks':[]}) as cloud:
             result=self.grade(sid);self.assertEqual(cloud.call_count,2)
             self.grade(sid);self.assertEqual(cloud.call_count,2)
-        self.assertTrue(result['is_final']);self.assertEqual(result['score'],0)
+        self.assertFalse(result['is_final']);self.assertIsNone(result['score'])
         self.assertEqual(result['uncertain_count'],2)
         self.assertFalse(any(q['confirmed_blank'] for q in result['reviews']))
 
@@ -155,9 +155,10 @@ class AutoGradeTests(unittest.TestCase):
         with patch('settings.recognize_selected',return_value={'blocks':self.blocks('1. [无法辨认]','2. I went home.')}) as cloud:
             result=self.grade(sid)
             self.assertEqual(cloud.call_count,1)
-        self.assertTrue(result['is_final']);self.assertTrue(result['reviews'][0]['uncertain'])
+        self.assertFalse(result['is_final']);self.assertTrue(result['reviews'][0]['uncertain'])
         self.assertEqual(result['reviews'][0]['auto_result']['source'],'no_valid_answer')
-        self.assertEqual(result['score'],3)
+        self.assertIsNone(result['score'])
+        self.assertEqual(result['known_score'],3)
 
     def test_missing_second_pass_clears_stale_regions_keeps_first_literal_reading(self):
         task=self.create_task();sid=self.submission(task);page=self.image(sid).json
@@ -211,7 +212,7 @@ class AutoGradeTests(unittest.TestCase):
         self.assertEqual(self.grade(sid)['score'],5)
         with patch('settings.recognize_selected',return_value={'blocks':[]}):
             result=self.post(f'/api/submissions/{sid}/auto-grade',{'rerun':True}).json
-        self.assertTrue(result['is_final']);self.assertEqual(result['score'],0)
+        self.assertFalse(result['is_final']);self.assertIsNone(result['score'])
         self.assertEqual(result['uncertain_count'],2)
         self.assertEqual(result['reviews'][0]['transcript'],'')
 

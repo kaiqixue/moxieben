@@ -32,6 +32,8 @@ def preview(conn, task):
         "SELECT 1 FROM submissions WHERE task_id=? AND grading_state='running'",
         f"SELECT 1 FROM pages WHERE submission_id IN ({SUBMISSIONS}) AND status='running'",
         f"SELECT 1 FROM batch_photos WHERE assignment_id IN ({ASSIGNMENTS}) AND status='identifying'"))
+    if 'task_id' in {c[1] for c in conn.execute('PRAGMA table_info(grading_jobs)')}:
+        busy = busy or bool(conn.execute("SELECT 1 FROM grading_jobs WHERE task_id=? AND state IN ('queued','running')", (tid,)).fetchone())
     return {'id': tid, 'name': task['name'], 'counts': counts, 'can_delete': not busy,
             'blocked_reason': '正在识别或批改，请等待处理结束后再删除。' if busy else ''}
 
@@ -86,6 +88,10 @@ def register(app, db, row, database, uploads):
                     history = json.loads(memory['history']) + [{'action': 'source_task_deleted', 'task_id': tid, 'photo_ids': removed, 'created_at': stamp}]
                     conn.execute('UPDATE identity_memories SET source_photo_ids=?,history=?,updated_at=? WHERE id=?',
                                  (json.dumps([pid for pid in sources if pid not in photo_ids]), json.dumps(history, ensure_ascii=False), stamp, memory['id']))
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='translation_ai_runs'").fetchone():
+                conn.execute(f'DELETE FROM translation_ai_runs WHERE submission_id IN ({SUBMISSIONS})', (tid,))
+                conn.execute('DELETE FROM translation_rubrics WHERE question_id IN (SELECT id FROM questions WHERE task_id=?)', (tid,))
+                conn.execute('DELETE FROM grading_jobs WHERE task_id=?', (tid,))
             for sql in (
                 f'DELETE FROM grading_jobs WHERE {JOBS}',
                 f'DELETE FROM batch_photos WHERE assignment_id IN ({ASSIGNMENTS})',

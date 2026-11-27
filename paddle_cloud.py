@@ -23,6 +23,17 @@ def _check(response):
     if response.status_code == 429:
         raise ValueError('PaddleOCR 请求过多或额度不足，请检查控制台额度。')
     if not 200 <= response.status_code < 300:
+        if response.status_code==400:
+            try:
+                code=response.json().get('code')
+            except (ValueError,AttributeError):
+                code=None
+            reasons={10001:'上传文件为空',10002:'文件链接无法识别',10003:'文件大小超过限制',
+                     10004:'文件格式不支持',10005:'文件内容无法解析',10006:'文件页数超过限制',
+                     10007:'模型名无效，请检查模型配置',10008:'请求参数无效，请检查识别参数',
+                     10009:'批次任务数超过限制',11002:'云端任务已过期，请明确重试'}
+            if type(code) is int and code in reasons:
+                raise ValueError(f'PaddleOCR 服务返回 HTTP 400（{code}）：{reasons[code]}。')
         raise ValueError(f'PaddleOCR 服务返回 HTTP {response.status_code}，请稍后重试并检查接口配置。')
 
 

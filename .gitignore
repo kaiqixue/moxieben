@@ -8,6 +8,7 @@ outputs/
 tmp-roster-builder/
 .workbuddy/
 .env
+local-data-dir.txt
 .env.*
 !.env.example
 secrets/
@@ -25,6 +26,8 @@ secrets/
 *.png
 !/static/images/teacher-desk.png
 *.zip
+/teacher-data/
+/RELEASE-03-ENVIRONMENT.md
 /tests/fixtures/*
 !/tests/fixtures/grammar_inline_ocr.json
 !/tests/fixtures/grammar_region_upright.json
@@ -38,3 +41,8 @@ secrets/
 !/scripts/recognition_evidence_ui_server.py
 !/scripts/check_recognition_evidence_ui.cjs
 !/scripts/check_visual_review_ui.cjs
+
+!/scripts/migrate_translation.py
+!/scripts/check_translation_ui.cjs
+
+!/scripts/check_identity_review_ui.cjs

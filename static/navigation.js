@@ -54,7 +54,7 @@ const Nav = (() => {
     if(state.busy){toast('正在上传或保存，请稍候再离开。',true);return false;}
     if(!hasDirty()&&!pendingFiles())return true;
     if(leaving)return leaving;
-    const focus=document.activeElement,canSave=state.drafts.size>0&&!state.newTaskDirty&&!pendingFiles();
+    const focus=document.activeElement,canSave=(state.drafts.size>0||(typeof Translation!=='undefined'&&Translation.hasDirty()))&&!state.newTaskDirty&&!pendingFiles();
     const d=document.createElement('dialog');d.id='leave-dialog';d.setAttribute('aria-labelledby','leave-title');
     d.innerHTML=`<h2 id="leave-title">${canSave?'答案修改尚未保存':'还有未提交的内容'}</h2><p>${canSave?'保存后会更新成绩和修改记录。':'离开会丢失当前填写或选择的文件，已上传照片不受影响。'}</p><p class="notice error" data-leave-error hidden role="alert"></p><div class="button-row">${canSave?'<button class="btn primary" data-leave="save">保存并离开</button>':''}<button class="btn danger" data-leave="discard">${canSave?'放弃修改':'放弃离开'}</button><button class="btn" data-leave="stay">${canSave?'继续编辑':'继续填写'}</button></div>`;
     document.body.append(d);d.showModal();d.querySelector('[data-leave=stay]').focus();
@@ -68,7 +68,7 @@ const Nav = (() => {
         [...d.querySelectorAll('button')].forEach(b=>b.disabled=true);state.busy=true;
         try{
           await saveAllReviews();
-          if(state.drafts.size||state.reviewSave?.error)throw new Error(state.reviewSave?.error||'还有未保存修改。');
+          if(state.drafts.size||(typeof Translation!=='undefined'&&Translation.hasDirty())||state.reviewSave?.error)throw new Error(state.reviewSave?.error||'还有未保存修改。');
           finish(true);
         }catch(error){const message=d.querySelector('[data-leave-error]');message.hidden=false;message.textContent=error.message;}
         finally{state.busy=false;updateReviewLock();if(d.isConnected)[...d.querySelectorAll('button')].forEach(b=>b.disabled=false);}
@@ -176,4 +176,29 @@ const Nav = (() => {
     if(event.key==='Tab'||event.key==='Enter'||event.key.startsWith('Arrow')||event.key===' ')set('keyboard');
   },{capture:true});
   document.addEventListener('pointerdown',()=>set('pointer'),{capture:true});
+})();
+
+// Keep desktop navigation preferences local to this browser; mobile stays expanded.
+(()=>{
+  const sidebar=document.querySelector('.sidebar');if(!sidebar)return;
+  sidebar.id='sidebar';
+  const button=document.createElement('button');
+  button.id='sidebar-toggle';button.className='sidebar-toggle';button.type='button';
+  button.setAttribute('aria-controls','sidebar');
+  button.innerHTML='<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg>';
+  sidebar.after(button);
+  const desktop=matchMedia('(min-width:681px)');let collapsed=false;
+  try{collapsed=localStorage.getItem('sidebar:collapsed')==='1';}catch{}
+  function apply(){
+    const hidden=desktop.matches&&collapsed,label=hidden?'展开侧边栏':'收起侧边栏';
+    document.body.classList.toggle('sidebar-collapsed',hidden);
+    button.setAttribute('aria-expanded',String(!hidden));
+    button.setAttribute('aria-label',label);button.title=label;
+  }
+  button.addEventListener('click',()=>{
+    collapsed=!collapsed;
+    try{localStorage.setItem('sidebar:collapsed',collapsed?'1':'0');}catch{}
+    apply();
+  });
+  desktop.addEventListener('change',apply);apply();
 })();

@@ -3,10 +3,86 @@
 Reference answers are deliberately not an input. Original blocks stay unchanged.
 """
 import re
+import unicodedata
 from difflib import SequenceMatcher
 
 MARKER = re.compile(r'[（(]\s*(\d{1,3})\s*[)）]')
 CARD_NUMBER = re.compile(r'^\s*(?:[（(]\s*(\d{1,3})\s*[)）]|(\d{1,3})\s*[.．、:：)）])\s*(.*)$')
+
+
+def worksheet_candidates(questions, pages):
+    """Map explicit paper sections/numbers; never use reference answers to locate ink."""
+    configured = [q for q in questions if q.get('paper_section') and q.get('paper_number')]
+    found = {}
+    for page in pages:
+        if page['status'] in ('error', 'running') or page.get('answer_layout') == 'separate':
+            continue
+        section, active, segments = '', None, []
+        for block in reading_order(page['blocks']):
+            for line in block['text'].splitlines():
+                title = re.match(r'^\s*(?:Section\s+([A-Za-z0-9]+)|([IVX]+)[.．、]\s*\S.*)\s*$', line, re.I)
+                if title:
+                    section = (title[1] or title[2]).casefold()
+                    active = None
+                    # Preserve an unnumbered first answer as an explicitly uncertain proposal.
+                    if any(q['paper_section'].casefold() == section and str(q['paper_number']) == '1' for q in configured):
+                        active = {'section': section, 'number': '1', 'lines': [], 'regions': [], 'unnumbered': True}
+                        segments.append(active)
+                    continue
+                if re.search(r'Summary|Directions:', line, re.I):
+                    active = None
+                    section = ''
+                    continue
+                marker = CARD_NUMBER.match(line)
+                if marker:
+                    n = marker[1] or marker[2]
+                    if active and active.get('unnumbered') and active['number'] == n and not active['lines']:
+                        segments.remove(active)
+                    # OCR may repeat an isolated number directly below its question.
+                    if active and active['number'] == n and not marker[3].strip():
+                        continue
+                    anchored = [q for q in configured if q.get('context') and
+                                re.sub(r'\s+', '', unicodedata.normalize('NFKC',q['context'].splitlines()[0])) ==
+                                re.sub(r'\s+', '', unicodedata.normalize('NFKC',marker[3]))]
+                    active = {'section': anchored[0]['paper_section'].casefold() if len(anchored)==1 else section,
+                              'number': n, 'lines': [], 'regions': []}
+                    segments.append(active)
+                    line = marker[3]
+                if active is not None:
+                    if re.search(r'姓名|学号|第\s*\d+\s*页|周测卷|Summary|Directions:', line, re.I):
+                        continue
+                    if (active['regions'] and any(re.search(r'[A-Za-z]',x) and not re.search(r'[\u4e00-\u9fff]',x) for x in active['lines'])
+                            and not marker and block.get('approximate')):
+                        previous = active['regions'][-1]['box']
+                        box = block['box']
+                        intersection = max(0,min(previous[2],box[2])-max(previous[0],box[0])) * max(0,min(previous[3],box[3])-max(previous[1],box[1]))
+                        area = min((previous[2]-previous[0])*(previous[3]-previous[1]),(box[2]-box[0])*(box[3]-box[1]))
+                        if intersection < area * .5:
+                            active = None
+                            continue
+                    active['lines'].append(line)
+                    region = {'page_id': page['id'], 'box': block['box'], 'block_ids': [block['id']]}
+                    if region not in active['regions']:
+                        active['regions'].append(region)
+        for q in configured:
+            hits = [s for s in segments if s['section'] == q['paper_section'].strip().casefold()
+                    and s['number'] == str(q['paper_number'])]
+            if len(hits) != 1:
+                continue
+            segment = hits[0]
+            english = [line for line in segment['lines'] if not re.search(r'[\u4e00-\u9fff]', line) and re.search(r'[A-Za-z]',line)]
+            if q['kind'] in ('word', 'phrase'):
+                # Only explicit OCR answer spans justify separating ink from printed context.
+                fragments = re.findall(r'\\(?:underline|uwave)\{(?:\\text\{([^{}]*)\}|([^{}]*))\}', '\n'.join(english))
+                transcript = ' '.join(a or b for a, b in fragments).strip()
+            else:
+                transcript = ' '.join(plain_ocr(line).strip() for line in english).strip()
+            if not transcript or not re.search(r'[A-Za-z]', transcript):
+                continue
+            found.setdefault(q['question_id'], []).append(dict(question_id=q['question_id'],
+                transcript=transcript, regions=segment['regions'], source='worksheet_section',
+                uncertain=True, reason='已按卷面分组和原题号提取；请核对作答区域及印刷文字后确认。'))
+    return [values[0] for values in found.values() if len(values) == 1]
 
 
 def card_lines(page):

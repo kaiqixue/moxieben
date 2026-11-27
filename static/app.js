@@ -49,7 +49,7 @@ function updateUploadFiles(input) {
   const label=$(`[data-files-for="${input.id}"]`);if(!label)return;
   label.textContent=input.files.length?`${input.files.length} 张照片：${[...input.files].map(file=>file.name).join('、')}`:'尚未选择照片';
 }
-const kindNames = {word:'单词', phrase:'短语', sentence:'句子',grammar:'语法填空'};
+const kindNames = {word:'单词', phrase:'短语', sentence:'句子',grammar:'语法填空',summary_cloze:'概要填空',summary:'概要写作',essay:'作文'};
 const state = {submission:null,pageId:null,activeQuestion:null,selected:new Set(),drafts:new Map(),reviewSave:null,filter:'all',reviewOrder:'priority',zoom:100,draw:false,busy:false,newTaskDirty:false,ocrProgress:null,routeVersion:0,pageUpload:null};
 let toastTimer, gradingPollTimer;
 const photoRotations = new Map();
@@ -197,7 +197,7 @@ async function api(path, options = {}) {
   return data;
 }
 
-function hasDirty() { return state.newTaskDirty || state.drafts.size > 0; }
+function hasDirty() { return state.newTaskDirty || state.drafts.size > 0 || Translation.hasDirty() || Writing.hasDirty(); }
 async function navigate(path, replace = false) {
   return Nav.go(path,replace);
 }
@@ -217,6 +217,8 @@ function dateText(value) {
 function numberText(value) { return Number(value || 0).toLocaleString('zh-CN', {maximumFractionDigits:2}); }
 
 async function route() {
+  Translation.reset();
+  Writing.reset();
   $('#main').classList.remove('submission-page');
   clearTimeout(gradingPollTimer);clearTimeout(listPollTimer);recognitionList=null;
   state.pageUpload = null;
@@ -264,6 +266,9 @@ async function route() {
       if (data.reviews.some(q => q.question_id === questionId)) state.activeQuestion = questionId;
       const region = data.reviews.find(q => q.question_id === state.activeQuestion)?.regions?.[0];
       if (region) state.pageId = region.page_id;
+      await Translation.loadSubmission(data);
+      await Writing.loadSubmission(data);
+      if(version!==state.routeVersion)return;
       renderSubmission();
       if (isGrading(data)) pollGrading(data.id,version);
     } else if (taskMatch) {
@@ -286,7 +291,7 @@ async function route() {
     } else await Workbench.render();
   } catch (error) {
     if (version !== state.routeVersion) return;
-    $('#main').innerHTML = heading('暂时无法打开', '请确认本地服务正常运行。') + `<div class="notice error">${escapeHTML(error.message)}</div><button class="btn" data-action="reload">重新加载</button>`;
+    $('#main').innerHTML = heading('暂时无法打开', error.status===403?'当前请求被访问保护拦截，请核对下方原因。':'页面加载失败，请查看下方原因并重试。') + `<div class="notice error">${escapeHTML(error.message)}</div><button class="btn" data-action="reload">重新加载</button>`;
   } finally {
     if(version===state.routeVersion)enterPage();
   }
@@ -302,7 +307,7 @@ async function renderSettings() {
   updateSettingsProvider();
   const review = await api('/api/settings/ai-review');
   if (version !== state.routeVersion || location.pathname !== '/settings') return;
-  $('#main').insertAdjacentHTML('beforeend', `<form id="ai-review-settings" class="card"><div class="card-content form-grid"><h2>AI 自动复核</h2><p>OCR 后先复核单题；单题定位不足时发送整页照片，按题号生成复读建议。老师核对后可一键采纳。使用支持图片的 OpenAI 兼容接口，独立于主 OCR 配置。</p><label class="inline-check"><input type="checkbox" name="enabled" ${review.enabled?'checked':''}>启用后台自动复核</label><label class="field">API 地址<input name="base_url" type="url" value="${escapeHTML(review.base_url)}" placeholder="https://api.example.com/v1"></label><label class="field">图片模型名<input name="model" value="${escapeHTML(review.model)}"></label><label class="field">API Key（${review.api_key_configured?'已配置，留空保留':'尚未配置'}）<input name="api_key" type="password" autocomplete="new-password"></label><label class="inline-check"><input name="clear_key" type="checkbox">清除已保存的 Key</label><label class="field">每次任务最多复核题数<input name="limit" type="number" min="1" max="100" value="${review.limit}"></label><p class="notice">启用后会将单题裁图或整页照片（可能含姓名、学号）发送至此服务，可能产生费用。无法定位、看不清或识别仍冲突的题保留给老师；已确认答案不会自动覆盖。</p><div class="button-row"><button class="btn primary" type="submit">保存 AI 设置</button><button class="btn" type="submit" name="test" value="1">保存并测试图片接口（可能计费）</button></div><p data-ai-message role="status" aria-live="polite"></p></div></form>`);
+  $('#main').insertAdjacentHTML('beforeend', `<form id="ai-review-settings" class="card"><div class="card-content form-grid"><h2>批改后自动 AI 复核</h2><p>一次配置后，每次上传先对匹配失败的照片复核姓名、学号和班级，再在批改后按照片复核本次全部识别异常短答，不限制为 8 题，无需逐题打开。模型与可靠 OCR 相互印证时自动处理，老师只核对剩余冲突或看不清的题。使用支持图片的 OpenAI 兼容接口，独立于主 OCR 配置。</p><label class="inline-check"><input type="checkbox" name="enabled" ${review.enabled?'checked':''}>启用后台自动复核</label><label class="field">API 地址<input name="base_url" type="url" value="${escapeHTML(review.base_url)}" placeholder="https://api.example.com/v1"></label><label class="field">图片模型名<input name="model" value="${escapeHTML(review.model)}"></label><label class="field">API Key（${review.api_key_configured?'已配置，留空保留':'尚未配置'}）<input name="api_key" type="password" autocomplete="new-password"></label><label class="inline-check"><input name="clear_key" type="checkbox">清除已保存的 Key</label><p class="notice">启用后会将单题裁图或整页照片（可能含姓名、学号）发送至此服务，可能产生费用。无法定位、看不清或识别仍冲突的题保留给老师；已确认答案不会自动覆盖。</p><div class="button-row"><button class="btn primary" type="submit">保存 AI 设置</button><button class="btn" type="submit" name="test" value="1">保存并测试图片接口（可能计费）</button></div><p data-ai-message role="status" aria-live="polite"></p></div></form>`);
 }
 
 document.addEventListener('submit', async event => {
@@ -311,7 +316,7 @@ document.addEventListener('submit', async event => {
   const form=event.target, fields=form.elements, button=event.submitter;
   await busyAction(button, async () => {
     await api('/api/settings/ai-review', {method:'PATCH',body:{enabled:fields.enabled.checked,
-      limit:Number(fields.limit.value),base_url:fields.base_url.value,model:fields.model.value,
+      base_url:fields.base_url.value,model:fields.model.value,
       api_key:fields.api_key.value,clear_key:fields.clear_key.checked}});
     fields.api_key.value='';fields.clear_key.checked=false;
     let message='AI 设置已保存。';
@@ -408,8 +413,8 @@ function renderDashboard(tasks) {
 }
 
 function answerRow(index, answer = '', question = {}) {
-  const kind = question.kind || 'word';
-  return `<tr><td><input class="number-input" aria-label="题号" type="number" min="1" max="999" value="${question.number || index}" required style="width:65px"></td><td><select aria-label="第 ${index} 题类型">${Object.entries(kindNames).map(([value,label])=>`<option value="${value}" ${value===kind?'selected':''}>${label}</option>`).join('')}</select></td><td><input class="answer-input" aria-label="第 ${index} 题标准答案" value="${escapeHTML(answer)}" placeholder="例如 apple" required maxlength="4000"><details><summary>上下文 / 提示词（选填）</summary><label class="field">题目上下文<textarea class="context-input" maxlength="10000" rows="3">${escapeHTML(question.context || '')}</textarea></label><label class="field">提示词<input class="hint-input" maxlength="200" value="${escapeHTML(question.hint || '')}"></label></details></td><td><input class="variant-input" aria-label="第 ${index} 题可接受写法" placeholder="多个写法用 | 分隔" maxlength="5000"></td><td><input class="points-input" aria-label="第 ${index} 题分值" type="number" min="0.01" max="1000" step="0.01" value="${question.points ?? 1}" required></td><td><button type="button" class="icon-button" data-action="remove-row" aria-label="删除第 ${index} 题">×</button></td></tr>`;
+  const kind = question.scoring_mode === 'translation' ? 'translation' : question.kind || 'word';
+  return `<tr><td><input class="number-input" aria-label="题号" type="number" min="1" max="999" value="${question.number || index}" required style="width:65px"></td><td><select aria-label="第 ${index} 题类型">${Object.entries({...kindNames,translation:'中译英 · AI 建议评分'}).map(([value,label])=>`<option value="${value}" ${value===kind?'selected':''}>${label}</option>`).join('')}</select></td><td>${Translation.creationFields(question,kind)}${Writing.creationFields(question,kind)}<input class="answer-input" aria-label="第 ${index} 题标准答案" value="${escapeHTML(answer)}" placeholder="参考答案 / 范文（写作可留空）" ${Writing.isWriting(kind)?'':'required'} maxlength="4000"><details><summary>卷面题号 / 上下文（选填）</summary><label class="field">卷面分组<input class="paper-section-input" maxlength="40" value="${escapeHTML(question.paper_section||'')}" placeholder="例如 A（对应 Section A）"></label><label class="field">卷面原题号<input class="paper-number-input" type="number" min="1" max="999" value="${escapeHTML(question.paper_number||'')}" placeholder="分组内的原题号"></label><label class="field">题目上下文<textarea class="context-input" maxlength="10000" rows="3">${escapeHTML(question.context || '')}</textarea></label><label class="field">提示词<input class="hint-input" maxlength="200" value="${escapeHTML(question.hint || '')}"></label></details></td><td><input class="variant-input" aria-label="第 ${index} 题可接受写法" placeholder="多个写法 / 参考版本用 | 分隔" value="${escapeHTML((question.variants||[]).join(' | '))}" maxlength="20000"></td><td><input class="points-input" aria-label="第 ${index} 题分值" type="number" min="0.01" max="1000" step="0.01" value="${question.points===''||question.points==null?1:question.points}"></td><td><button type="button" class="icon-button" data-action="remove-row" aria-label="删除第 ${index} 题">×</button></td></tr>`;
 }
 function contextHTML(q) {
   return `${q.context ? `<div class="question-context"><span class="muted tiny">题目上下文</span><p>${escapeHTML(q.context)}</p></div>` : ''}${q.hint ? `<p class="tiny">提示词：<strong>${escapeHTML(q.hint)}</strong></p>` : ''}`;
@@ -419,18 +424,19 @@ function selectedWord(id) {
   if (!file || !/\.docx$/i.test(file.name) || file.size > 5*1024*1024) throw new Error('请选择不超过 5MB 的 Word（.docx）文件。');
   return file;
 }
-async function previewWord() {
+async function previewWord(useAI = false) {
   const file = selectedWord('#word-file');
-  const hasAnswers = $$('#answer-rows .answer-input').some(input=>input.value.trim());
+  const hasAnswers = $$('#answer-rows .answer-input,#answer-rows textarea').some(input=>input.value.trim()) || $('#new-task-form').elements.task_name.value.trim() || $('#task-passage').value.trim() || $('#task-instructions').value.trim();
   if (hasAnswers && !confirm('Word 预览将替换当前答案表及原文。尚未保存的内容会丢失，确定继续？')) return;
   const body = new FormData(); body.append('file',file);
+  if(useAI)body.append('mode','ai');
   const draft = await api('/api/tasks/import-word',{method:'POST',body});
   $('#answer-rows').innerHTML = draft.questions.map(q=>answerRow(q.number,q.answer,q)).join('');
   $('#new-task-form').elements.task_name.value = draft.name;
   $('#task-passage').value = draft.passage;
   $('#task-instructions').value = draft.instructions;
   $('#word-source-name').value = draft.source_name;
-  $('#word-warnings').innerHTML = `<div class="notice warn">${draft.warnings.map(escapeHTML).join('<br>')}</div>`;
+  $('#word-warnings').innerHTML = `<p>已识别 ${draft.questions.length} 道题，默认分值可修改；创建前请核对任务名称与题型。</p><div class="notice warn">${draft.warnings.map(escapeHTML).join('<br>')}</div>`;
   $('#word-confirmation').hidden = false;
   $('#word-confirmed').checked = false; $('#word-confirmed').required = true;
   state.newTaskDirty = true;
@@ -438,71 +444,45 @@ async function previewWord() {
   toast(`已提取 ${draft.questions.length} 道候选题，请核对后创建。`);
 }
 async function previewAnswerWord() {
-  const file = selectedWord('#answer-word-file');
-  const body = new FormData();
-  body.append('file', file);
-  body.append('mode', 'answers');
-  const draft = await api('/api/tasks/import-word', {method:'POST', body});
-  const preview = $('#answer-word-preview');
-  preview.dataset.name = draft.name;
-  preview.dataset.source = draft.source_name;
-  preview.innerHTML = `<p>请勾选要填入草稿的题目。答案可在这里修改，分值在草稿中填写。</p>
-    ${draft.warnings.length ? `<div class="notice warn" role="status">${draft.warnings.map(escapeHTML).join('<br>')}</div>` : ''}
-    ${draft.groups.map((group, index) => `<fieldset class="class-choice-list" data-answer-word-group style="max-height:none;min-inline-size:0">
-      <legend>${escapeHTML(group.label)} · ${group.items.length} 题</legend>
-      ${group.kind === 'summary' ? `<p>概要写作目前可预览。</p>${group.items.flatMap(item => item.versions.map(version =>
-        `<label class="field">${escapeHTML(version.label)}<textarea rows="4" readonly>${escapeHTML(version.answer)}</textarea></label>`)).join('')}`
-        : `<label class="inline-check"><input type="checkbox" data-answer-word-all>选择本组全部题目</label>
-        ${group.kind === 'unclassified' ? `<label class="field">本组题型<select data-answer-word-kind><option value="">请选择</option><option value="phrase">半句</option><option value="sentence">整句</option></select></label>` : ''}
-        ${group.items.map((item, position) => {
-          const id = `answer-word-${index}-${position}`;
-          return `<div data-answer-word-item data-kind="${escapeHTML(group.kind)}">
-            <label class="inline-check"><input type="checkbox" data-answer-word-choice>选择原第 ${item.number} 题</label>
-            <textarea id="${id}" aria-label="${escapeHTML(group.label)}原第 ${item.number} 题答案" rows="2" maxlength="4000">${escapeHTML(item.answer)}</textarea>
-          </div>`;
-        }).join('')}`}
-    </fieldset>`).join('')}
-    ${draft.groups.some(group => group.kind !== 'summary') ? '<button class="btn primary" type="button" data-action="apply-answer-word">填入作业草稿</button>' : ''}`;
+  const file=selectedWord('#answer-word-file'),body=new FormData();body.append('file',file);body.append('mode','answers');
+  const draft=await api('/api/tasks/import-word',{method:'POST',body}),preview=$('#answer-word-preview');preview._answerDraft=draft;
+  preview.innerHTML=`<p>勾选要填入草稿的题目；分值有标注就保留，没有则默认为 1 分。多个参考版本仍是一道题。</p>${draft.warnings.length?`<div class="notice warn">${draft.warnings.map(escapeHTML).join('<br>')}</div>`:''}${draft.groups.map((group,g)=>`<fieldset class="class-choice-list" data-answer-word-group style="max-height:none;min-inline-size:0"><legend>${escapeHTML(group.label)} · ${group.items.length} 题</legend><label class="inline-check"><input type="checkbox" data-answer-word-all>选择本组全部题目</label><label class="field">对应卷面分组<input data-answer-word-section maxlength="40" value="${escapeHTML(group.paper_section||'')}" placeholder="例如 A（Section A）"></label>${group.kind==='unclassified'?'<label class="field">本组题型<select data-answer-word-kind><option value="">请选择</option><option value="phrase">半句</option><option value="sentence">整句</option><option value="essay">作文</option></select></label>':''}${group.items.map((item,i)=>`<div data-answer-word-item data-group="${g}" data-item="${i}"><label class="inline-check"><input type="checkbox" data-answer-word-choice>选择原第 ${item.number} 题</label>${(item.versions?.length?item.versions:[{label:'参考答案',answer:item.answer||''}]).map((v,n)=>`<label class="field">${escapeHTML(v.label||'参考版本 '+(n+1))}<textarea data-answer-version="${n}" rows="3" maxlength="4000">${escapeHTML(v.answer||'')}</textarea></label>`).join('')}</div>`).join('')}</fieldset>`).join('')}<button class="btn primary" type="button" data-action="apply-answer-word">填入作业草稿</button>`;
 }
 function applyAnswerWord() {
-  const preview = $('#answer-word-preview');
-  const selected = $$('[data-answer-word-choice]:checked', preview);
-  if (!selected.length) throw new Error('请先勾选要填入草稿的题目。');
-  const questions = selected.map((box, index) => {
-    const item = box.closest('[data-answer-word-item]');
-    const kind = item.dataset.kind === 'unclassified' ? $('[data-answer-word-kind]', item.closest('fieldset')).value : item.dataset.kind;
-    const answer = $('textarea', item).value.trim().replace(/\s+/g, ' ');
-    if (!kind || !answer || answer.length > 4000) throw new Error('请为每道已选题补全题型和答案（最多 4000 字）。');
-    return answerRow(index+1, answer, {kind, points:''});
+  const preview=$('#answer-word-preview'),draft=preview._answerDraft,selected=$$('[data-answer-word-choice]:checked',preview);
+  if(!selected.length)throw new Error('请先勾选要填入草稿的题目。');
+  const questions=selected.map((box,index)=>{
+    const el=box.closest('[data-answer-word-item]'),group=draft.groups[Number(el.dataset.group)],item=group.items[Number(el.dataset.item)],fieldset=el.closest('fieldset');
+    const kind=group.kind==='unclassified'?$('[data-answer-word-kind]',fieldset).value:group.kind;
+    const references=$$('textarea[data-answer-version]',el).map(input=>input.value.trim()),answer=references[0]||'';
+    if(!kind||(!answer&&!Writing.isWriting(kind)))throw new Error('请补全所选题目的题型与答案。');
+    const section=$('[data-answer-word-section]',fieldset).value.trim();
+    return answerRow(index+1,answer,{...item,number:index+1,kind,variants:[...(item.variants||[]),...references.slice(1)].filter(Boolean),points:item.points===''||item.points==null?1:item.points,paper_section:section,paper_number:section?String(item.number):''});
   });
-  const existing = $$('#answer-rows input:not([type=number]),#answer-rows textarea').some(input => input.value.trim());
-  if (existing && !confirm('填入 Word 答案会替换当前答案表。确定继续？')) return;
-  $('#answer-rows').innerHTML = questions.join('');
-  const title = $('#new-task-form').elements.task_name;
-  if (!title.value.trim()) title.value = preview.dataset.name;
-  $('#word-source-name').value = preview.dataset.source;
-  $('#word-confirmation').hidden = false;
-  $('#word-confirmed').checked = false;
-  $('#word-confirmed').required = true;
-  state.newTaskDirty = true;
-  updateEditorTotal();
-  $('.points-input', $('#answer-rows'))?.focus();
-  toast(`已填入 ${questions.length} 道题，请填写分值并核对。`);
+  const existing=$$('#answer-rows .answer-input,#answer-rows textarea').some(input=>input.value.trim())||$('#new-task-form').elements.task_name.value.trim();
+  if(existing&&!confirm('填入 Word 内容会替换当前题目表和任务信息，确定继续？'))return;
+  $('#answer-rows').innerHTML=questions.join('');$('#new-task-form').elements.task_name.value=draft.name;
+  $('#word-source-name').value=draft.source_name;$('#task-passage').value=draft.passage||'';$('#task-instructions').value=draft.instructions||'';
+  $('#word-confirmation').hidden=false;$('#word-confirmed').checked=false;$('#word-confirmed').required=true;state.newTaskDirty=true;updateEditorTotal();
+  toast(`已填入 ${questions.length} 道题，缺失分值已按 1 分填写，请核对。`);
 }
 function renderNewTask() {
   $('#breadcrumb').textContent = '工作台 / 新建默写任务';
   $('#main').innerHTML = heading('新建默写任务', '先准备标准答案，再开始收集学生答卷。', '<a class="btn" href="/" data-nav>返回任务列表</a>') +
-    '<form id="new-task-form"><section class="card"><div class="card-header"><div><h2>从 Word 导入语法填空</h2><p>识别括号题号、下划线和文末答案区；只生成候选内容，不自动保存。</p></div></div><div class="card-content form-grid"><label class="field">选择 Word 试题（.docx，不超过 5MB）<input id="word-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><button class="btn" type="button" data-action="preview-word">解析 Word 并预览题目</button><div id="word-warnings" aria-live="polite"></div><input id="word-source-name" type="hidden"><details><summary>试题原文与说明（可修改）</summary><label class="field">试题说明<textarea id="task-instructions" maxlength="4000" rows="2"></textarea></label><label class="field">完整题干（不包含答案区）<textarea id="task-passage" maxlength="200000" rows="10"></textarea></label></details><label class="inline-check" id="word-confirmation" hidden><input id="word-confirmed" type="checkbox">我已对照原 Word 核对题号、上下文、提示词、答案与分值</label></div></section><section class="card"><div class="card-header"><div><h2>导入答案 Word</h2><p>上传纯答案，按半句、整句和概要写作分组预览。</p></div></div><div class="card-content form-grid"><label class="field">选择答案 Word（.docx，不超过 5MB）<input id="answer-word-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><button class="btn" type="button" data-action="preview-answer-word">识别并预览答案</button><div id="answer-word-preview" class="form-grid" aria-live="polite"></div></div></section><section class="card"><div class="card-header"><div><h2>任务信息</h2><p>使用清晰的名称，方便以后查找</p></div></div><div class="card-content"><label class="field">任务名称<input name="task_name" placeholder="例如：Unit 3 单词与短语默写" maxlength="120" required></label></div></section><section class="card"><div class="card-header"><div><h2>快速录入标准答案</h2><p>先把答案一行一题粘贴进来，题号、每题 1 分和单词类型会自动生成；之后可在表格中调整。</p></div><button class="btn small" type="button" data-action="add-row">＋ 添加一题</button></div><div class="card-content"><div class="paste-row"><label class="field">批量添加<textarea id="paste-answers" rows="3" placeholder="一行一题，例如：&#10;apple&#10;go to school&#10;I like reading."></textarea></label><button class="btn" type="button" data-action="paste-rows">添加到答案表</button></div></div><div class="table-wrap"><table class="answer-editor"><thead><tr><th>题号</th><th>类型</th><th>标准答案</th><th>可接受写法（选填）</th><th>分值</th><th></th></tr></thead><tbody id="answer-rows">'+answerRow(1)+'</tbody></table></div><div class="editor-footer"><span class="muted tiny" id="editor-total">共 1 题 · 总分 1 分</span><button class="btn primary" type="submit">创建默写任务 →</button></div></section><p class="notice"><strong>创建前预览：</strong>题数和总分会随表格实时更新。评分规则：标准答案或任一可接受写法完全匹配即得本题满分，否则为 0 分。区分大小写和标点，连续空白会合并。复核时可手动改分并填写理由。</p></form>';
+    '<form id="new-task-form"><section class="card"><div class="card-header"><div><h2>从 Word 导入题目与答案</h2><p>支持语法填空及分组翻译卷，自动区分原题与参考答案；只生成可编辑草稿，不自动保存。</p></div></div><div class="card-content form-grid"><label class="field">选择 Word 试题（.docx，不超过 5MB）<input id="word-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><button class="btn" type="button" data-action="preview-word">解析 Word 并预览题目</button><button class="btn" type="button" data-action="preview-word-ai">AI 辅助分题并预览</button><p class="muted tiny">普通解析在本机完成。AI 辅助会把这份文档的文字发送到当前账号配置的 AI 服务，可能计费；不会发送学生照片。分题结果仍需核对，不会自动生成成绩。</p><div id="word-warnings" aria-live="polite"></div><input id="word-source-name" type="hidden"><details><summary>试题原文与说明（可修改）</summary><label class="field">试题说明<textarea id="task-instructions" maxlength="4000" rows="2"></textarea></label><label class="field">完整题干（不包含答案区）<textarea id="task-passage" maxlength="200000" rows="10"></textarea></label></details><label class="inline-check" id="word-confirmation" hidden><input id="word-confirmed" type="checkbox">我已对照原 Word 核对题号、上下文、提示词、答案与分值</label></div></section><section class="card"><div class="card-header"><div><h2>导入答案 Word</h2><p>上传纯答案，按半句、整句和概要写作分组预览。</p></div></div><div class="card-content form-grid"><label class="field">选择答案 Word（.docx，不超过 5MB）<input id="answer-word-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></label><button class="btn" type="button" data-action="preview-answer-word">识别并预览答案</button><div id="answer-word-preview" class="form-grid" aria-live="polite"></div></div></section><section class="card"><div class="card-header"><div><h2>任务信息</h2><p>使用清晰的名称，方便以后查找</p></div></div><div class="card-content"><label class="field">任务名称<input name="task_name" placeholder="例如：Unit 3 单词与短语默写" maxlength="120" required></label></div></section><section class="card"><div class="card-header"><div><h2>快速录入标准答案</h2><p>先把答案一行一题粘贴进来，题号、每题 1 分和单词类型会自动生成；之后可在表格中调整。</p></div><button class="btn small" type="button" data-action="add-row">＋ 添加一题</button></div><div class="card-content"><div class="paste-row"><label class="field">批量添加<textarea id="paste-answers" rows="3" placeholder="一行一题，例如：&#10;apple&#10;go to school&#10;I like reading."></textarea></label><button class="btn" type="button" data-action="paste-rows">添加到答案表</button></div></div><div class="table-wrap"><table class="answer-editor"><thead><tr><th>题号</th><th>类型</th><th>标准答案</th><th>可接受写法（选填）</th><th>分值</th><th></th></tr></thead><tbody id="answer-rows">'+answerRow(1)+'</tbody></table></div><div class="editor-footer"><span class="muted tiny" id="editor-total">共 1 题 · 总分 1 分</span><button class="btn primary" type="submit">创建默写任务 →</button></div></section><p class="notice"><strong>创建前预览：</strong>题数和总分会随表格实时更新。普通题采用标准答案或可接受写法匹配，区分大小写和标点，合并连续空白。概要和作文采用内容与语言综合评价，AI 仅给建议分，须教师确认。</p></form>';
 }
 function updateEditorTotal() {
+  const translation=$$('#answer-rows select').some(el=>el.value==='translation');
+  let note=$('#translation-creation-note');if(translation&&!note){note=document.createElement('p');note.id='translation-creation-note';note.className='notice';$('#new-task-form').append(note);}if(note){note.hidden=!translation;note.textContent='中译英题使用独立评分细则判断语义、信息、语法与表达；合理的其他译法可以得分。AI 生成建议后，教师逐题确认最终成绩。上方完全匹配规则仅适用于其他题型。';}
   const rows = $$('#answer-rows tr');
-  $('#editor-total').textContent = `共 ${rows.length} 题 · 总分 ${numberText(rows.reduce((sum, row) => sum + Number($('.points-input', row).value || 0), 0))} 分`;
+  const counts={};rows.forEach(row=>{const kind=$('select',row).value;counts[kind]=(counts[kind]||0)+1;});
+  $('#editor-total').textContent = `${Object.entries(counts).map(([kind,n])=>(kindNames[kind]||'翻译')+' '+n+' 题').join(' · ')} · 共 ${rows.length} 题 · 总分 ${numberText(rows.reduce((sum, row) => sum + Number($('.points-input', row).value.trim() || 1), 0))} 分`;
 }
 async function createTask(form) {
   const rows = $$('#answer-rows tr');
   if (!rows.length) throw new Error('请至少添加一道题。');
-  const questions = rows.map((row, index) => ({number:Number($('.number-input',row).value),context:$('.context-input',row).value,hint:$('.hint-input',row).value,kind:$('select', row).value,answer:$('.answer-input', row).value.trim(),variants:$('.variant-input', row).value.split('|').map(x => x.trim()).filter(Boolean),points:Number($('.points-input', row).value)}));
-  if (questions.some(q => !q.answer)) throw new Error('每道题都需要填写标准答案。');
+  const questions = rows.map((row, index) => ({...Translation.creationValues(row),...Writing.creationValues(row),number:Number($('.number-input',row).value),paper_section:$('.paper-section-input',row).value.trim(),paper_number:$('.paper-number-input',row).value,context:$('.context-input',row).value,hint:$('.hint-input',row).value,kind:$('select', row).value==='translation'?'sentence':$('select', row).value,answer:$('.answer-input', row).value.trim(),variants:$('.variant-input', row).value.split('|').map(x => x.trim()).filter(Boolean),points:Number($('.points-input', row).value.trim() || 1)}));
+  if (questions.some(q => !q.answer&&!Writing.isWriting(q.kind))) throw new Error('每道题都需要填写标准答案。');
   if ($('#word-source-name').value && !$('#word-confirmed').checked) throw new Error('请先核对 Word 候选内容并勾选确认。');
   const workflow=new URLSearchParams(location.search).get('workflow')==='1',class_ids=$$('input[name=workflow_classes]:checked',form).map(el=>Number(el.value));
   if(workflow&&!class_ids.length)throw new Error('请至少选择一个布置班级。');
@@ -530,6 +510,12 @@ function renderTask(task,refresh=false) {
     if(previous) {if(pending)previous.replaceWith(pending);else previous.remove();}
     else if(pending)$('#task-class-panel').after(pending);
   } else $('#main').innerHTML=html;
+  if(!refresh){
+    const panel=document.createElement('details');panel.className='card';
+    panel.innerHTML=`<summary class="card-content">设置卷面分组与原题号</summary><form id="paper-mapping-form" data-task-id="${task.id}" class="card-content"><p>例如系统第 11 题对应 Section B 的第 1 题：填写 B 和 1。仅保存对应关系；已有答卷需点击“重新分题”才能更新提取结果。</p><div class="table-wrap"><table><thead><tr><th>系统题号</th><th>卷面分组</th><th>原题号</th><th>中文题干 / 上下文</th></tr></thead><tbody>${task.questions.map(q=>`<tr data-paper-question="${q.id}"><td>${q.number}</td><td><input aria-label="第 ${q.number} 题卷面分组" data-paper-section maxlength="40" value="${escapeHTML(q.paper_section||'')}" placeholder="A / B"></td><td><input aria-label="第 ${q.number} 题原题号" data-paper-number type="number" min="1" max="999" value="${escapeHTML(q.paper_number||'')}"></td><td><textarea aria-label="第 ${q.number} 题上下文" data-paper-context maxlength="10000" rows="2">${escapeHTML(q.context||'')}</textarea></td></tr>`).join('')}</tbody></table></div><button type="submit" class="btn primary">保存卷面对应关系</button><p data-paper-status role="status"></p></form>`;
+    $('#task-class-panel').after(panel);
+  }
+  if(!refresh)Translation.mountRubrics(task).catch(error=>toast('翻译细则读取失败：'+error.message,true));
   mountRecognitionList('task',task.submissions);recognitionList.task=task;
   if(task.background_jobs || task.submissions.some(s=>recognitionFor(s).state==='processing'))pollTaskList(task.id,state.routeVersion);
 }
@@ -598,7 +584,7 @@ function pollGrading(sid,version) {
       if (version !== state.routeVersion || state.submission?.id !== sid) return;
       state.submission = sub;
       // Preserve local edits and keyboard focus while only updating background state.
-      if (!state.drafts.size && !document.activeElement?.matches('[data-field]')) renderSubmission();
+      if (!state.drafts.size && !Writing.hasDirty() && !document.activeElement?.matches('[data-field],[data-writing-field]')) renderSubmission();
       else if(!isGrading(sub)) {
         const bar=$('.grading-status .running-bar');
         if(bar){bar.className=`notice ${sub.grading_state==='failed'?'error':''}`;bar.textContent=`${sub.grading_state==='failed'?`后台批改失败：${sub.grading_error || '请稍后重试'}`:sub.processing_job?.state==='interrupted'?'后台处理已中断':'后台处理已结束'}。当前输入已保留，保存修改后刷新成绩显示。`;}
@@ -643,7 +629,7 @@ function nextPriorityQuestion(reviews, currentId = null) {
   return reviewQuestions(reviews).filter(q => q.question_id !== currentId && !q.confirmed)[0] || null;
 }
 function reviewQuestions(reviews = state.submission.reviews) {
-  return reviews.filter(q => state.filter === 'all' || (state.filter === 'wrong' && (q.graded || q.auto_result || q.confirmed) && Number(q.score) < Number(q.points)) || (state.filter === 'uncertain' && q.uncertain) || (state.filter === 'different' && q.transcript.trim() && !q.matched) || (state.filter === 'pending' && (!q.confirmed || state.drafts.has(q.question_id))) || (state.filter === 'confirmed' && q.confirmed && !state.drafts.has(q.question_id)))
+  return reviews.filter(q => state.filter === 'all' || (state.filter === 'wrong' && q.graded && q.score != null && Number(q.score) < Number(q.points)) || (state.filter === 'uncertain' && q.uncertain) || (state.filter === 'different' && q.transcript.trim() && !q.matched) || (state.filter === 'pending' && (!q.confirmed || state.drafts.has(q.question_id))) || (state.filter === 'confirmed' && q.confirmed && !state.drafts.has(q.question_id)))
     .sort((a,b) => state.reviewOrder === 'number' ? a.number-b.number : questionPriority(a)-questionPriority(b) || a.number-b.number);
 }
 function selectReviewQuestion(id) {
@@ -659,7 +645,7 @@ function selectReviewQuestion(id) {
 }
 function recognitionEvidenceHTML(q) {
   const decision=q.auto_result;
-  if(decision?.ai_review) return `<div class="notice" role="note"><strong>AI 自动复核完成 · ${escapeHTML(decision.ai_review.model)}</strong><p>独立图片转录与局部 OCR 一致，系统按原文严格计分。原始识别证据已保留，教师仍可改判。</p><button class="btn small" data-action="undo-ai-review" data-id="${q.question_id}" data-event-id="${decision.ai_review.event_id}">撤销本次 AI 判定</button></div>`;
+  if(decision?.ai_review) return `<div class="notice" role="note"><strong>AI 自动复核完成 · ${escapeHTML(decision.ai_review.model)}</strong><p>独立图片转录与可靠 OCR 一致，系统按原文严格计分。原始识别证据已保留，教师仍可改判。</p><button class="btn small" data-action="undo-ai-review" data-id="${q.question_id}" data-event-id="${decision.ai_review.event_id}">撤销本次 AI 判定</button></div>`;
   if(!decision?.recognition_conflict || !decision.recognition_evidence?.length) return '';
   const labels={existing_ocr:'整页识别',supplementary_ocr:'整页补识别',region_supplementary_ocr:'局部补识别'};
   return `<div class="recognition-evidence notice warn" role="note" aria-label="识别结果对照"><strong>${q.uncertain?'识别结果不一致，请对照原图判定':'识别结果曾不一致，教师判定已保存'}</strong><dl>${decision.recognition_evidence.map(e=>`<div><dt>${labels[e.source]||'识别记录'}</dt><dd>${escapeHTML(e.transcript)}</dd></div>`).join('')}</dl><p>当前机器采用：${escapeHTML(decision.transcript)}；各次原文均保留。</p></div>`;
@@ -677,23 +663,34 @@ function visualReviewHTML(q) {
   const button = (action, label, disabled = false, variant = '') =>
     `<button class="btn small ${variant}" data-action="${action}" data-id="${q.question_id}" ${disabled ? 'disabled' : ''}>${label}</button>`;
   const label = {unreadable:'笔迹无法辨认', blank:'疑似空白，请核对原图', ambiguous:'笔迹或位置不能确定'};
-  const result = suggestion ? `<img alt="送给视觉模型的${suggestion.scope==='page'?'整页照片':'本题局部图'}" src="${escapeHTML(suggestion.preview_url)}"><p>${suggestion.scope==='page'?'整页多题复读 · ':''}复读转录 <strong>${suggestion.status === 'readable' ? escapeHTML(suggestion.transcript) : label[suggestion.status] || '无法核实'}</strong></p>
-    ${suggestion.error_code ? '<p class="status-danger">图片接口未取得有效结果，请检查设置后重试整页复读。</p>' : ''}
-    ${suggestion.suggested_score == null ? '' : `<p>建议 ${numberText(suggestion.suggested_score)} / ${numberText(suggestion.max_score)} 分</p>`}
-    ${suggestion.can_adopt ? button('visual-adopt', attentionContext ? '采纳并下一项' : '采纳复读建议', locked, 'primary') : '<p class="tiny muted">请对照原图使用下方人工判定。</p>'}` : '';
-  return `<section class="visual-review notice" aria-label="视觉复读建议"><strong>视觉复读</strong>
-    <p class="tiny muted">${state.draw === 'visual' ? '请在原图拖动，只圈本题作答。' : '框选本题作答后，可发送局部图复读。请避开姓名、学号和相邻题。'}</p>
-    <div class="button-row">${button('visual-select', state.draw === 'visual' ? '取消框选' : frame ? '重新框选' : '框选作答', locked || pending)}
-    ${frame ? button('visual-run', pending ? '正在复读…' : '发送局部图复读', locked || pending) : ''}
-    ${button('visual-page', pending ? '正在复读…' : '整页多题复读', locked || pending)}</div>
-    <p class="tiny muted">整页复读会发送当前照片（可能含姓名、学号），可能计费。按题号生成建议，采纳后更新成绩。</p>
-    <p role="status" class="tiny ${feedback ? 'status-danger' : 'muted'}">${escapeHTML(feedback || (pending ? '正在复读，可继续人工核对。' : ''))}</p>${result}</section>`;
+  const usable = suggestion?.status === 'readable' && !suggestion.error_code;
+  const differs = usable && suggestion.transcript.trim() !== (q.auto_result?.transcript ?? q.machine_text ?? '').trim();
+  const result = suggestion ? `${suggestion.error_code
+    ? `<p class="status-danger">${escapeHTML(suggestion.error_message || 'AI 未返回有效结果')}；可直接人工判定，或在班级核对页重试失败项。</p>`
+    : `<p>AI 复读：<strong>${usable ? escapeHTML(suggestion.transcript) : label[suggestion.status] || '无法核实'}</strong>${usable && suggestion.suggested_score != null ? ` <span class="visual-score">建议 ${numberText(suggestion.suggested_score)} / ${numberText(suggestion.max_score)} 分</span>` : ''}</p>`}
+    <p class="tiny muted">${usable ? differs ? 'AI 与原识别不一致，请对照原图采纳或人工判定。' : '识别文字一致，仍缺少自动确认依据，请对照原图采纳或人工判定。' : '未取得可靠的作答文字，请对照原图使用下方人工判定。'}</p>
+    ${usable && suggestion.can_adopt ? button('visual-adopt', attentionContext ? '采纳并下一项' : '采纳 AI 建议', locked, 'primary') : ''}`
+    : '<p class="tiny muted">暂无可采纳的 AI 建议。可直接人工判定，或在班级核对页补跑未完成题。</p>';
+  return `<section class="visual-review" aria-label="AI 核对建议"><strong>AI 核对建议</strong>${result}
+    <details class="visual-retry" ${state.draw === 'visual' || frame || pending ? 'open' : ''}><summary>重新识别</summary>
+      <p class="tiny muted">仅在识别失败或作答位置不正确时使用。${state.draw === 'visual' ? '请在原图拖动，只圈本题作答。' : '框选时请避开姓名、学号和相邻题。'}</p>
+      <div class="button-row">${button('visual-select', state.draw === 'visual' ? '取消框选' : frame ? '重新框选' : '框选作答', locked || pending)}
+      ${frame ? button('visual-run', pending ? '正在识别…' : '发送局部图复读', locked || pending) : ''}
+      ${button('visual-page', pending ? '正在识别…' : '补读本页未完成题', locked || pending)}</div>
+      <p class="tiny muted">重新识别可能计费。补读本页会发送当前照片（可能含姓名、学号），已有可用建议不会重复请求。</p>
+      ${suggestion?.preview_url ? `<a class="tiny" href="${escapeHTML(suggestion.preview_url)}" target="_blank" rel="noreferrer">查看本次识别所用图片</a>` : ''}
+    </details>
+    <p role="status" class="tiny muted">${escapeHTML(feedback || (pending ? '正在重新识别，可继续对照原图核对。' : ''))}</p></section>`;
 }
 
 function renderVisualReview() {
   const panel = $('#visual-review');
   const q = state.submission?.reviews.find(item=>item.question_id===state.activeQuestion);
-  if (panel) panel.innerHTML = visualReviewHTML(q);
+  if (panel) {
+    const retryOpen = panel.querySelector('.visual-retry')?.open;
+    panel.innerHTML = visualReviewHTML(q);
+    if (retryOpen && panel.querySelector('.visual-retry')) panel.querySelector('.visual-retry').open = true;
+  }
 }
 
 async function requestPageReread(id) {
@@ -703,7 +700,7 @@ async function requestPageReread(id) {
   let message='已生成整页复读建议，请逐题核对并采纳。';
   try {
     const result=await api(`/api/submissions/${sub.id}/visual-reread-page`,{method:'POST',body:{page_id:pageId}});
-    if(!result.suggestions) message=result.reason || '本页未生成可采纳建议，请核对原图。';
+    if(!result.suggestions) message=result.reason || '本页没有新增建议，可直接核对原图或采纳已有建议。';
   } catch(error) { message=error.message; }
   finally {
     visualPending=null;
@@ -745,16 +742,18 @@ async function requestVisualReread(id) {
 }
 
 function reviewHTML(q) {
+  if(Writing.isWriting(q.kind))return Writing.reviewHTML(q);
+  if(q.scoring_mode==='translation')return Translation.reviewHTML(q);
   const d = reviewDraft(q), dirty = state.drafts.has(q.question_id), active = state.activeQuestion === q.question_id;
   const confidence = confidenceFor(q);
   const waiting = !q.graded && !q.auto_result && !d.transcript.trim() && !d.confirmed_blank;
   const fullStatus = dirty ? '有未保存修改' : q.graded || q.auto_result ? `${q.teacher_edited || q.confirmed ? '教师复核' : '机器自动批改'} · ${q.uncertain ? '不确定' : Number(q.score) < Number(q.points) ? '答错' : '正确'}` : q.confirmed ? '已确认' : waiting ? '待识别 / 待提取' : questionPriority(q) === 0 ? '有差异 · 请核对' : confidence !== null && confidence < 0.85 ? '低置信度' : '待核对';
   const status = dirty?'未保存':q.uncertain?'不确定':q.confirmed_blank?'未作答':waiting?'待识别':(q.graded||q.auto_result||q.confirmed)?(Number(q.score)<Number(q.points)?'答错':''):'待核对';
   const statusClass = dirty || q.uncertain || status==='待核对' ? 'amber' : status==='答错' || status==='未作答' ? 'red' : '';
-  const summary = q.teacher_decision ? `${({correct:'教师判定正确',incorrect:'教师判定错误',blank:'教师确认未作答'})[q.teacher_decision]} · ${numberText(q.score)} / ${numberText(q.points)} 分${q.transcript ? ` · 原转录：${escapeHTML(q.transcript)}` : ' · 未补录作答文字'}` : q.graded || q.auto_result ? `作答：${escapeHTML(q.transcript || (q.confirmed_blank ? '（教师确认未作答）' : q.auto_result?.diagnostic === 'ocr_no_answer' ? '（识别结果未返回作答文字）' : '（识别文字未能可靠关联本题）'))} · 标准答案：${escapeHTML(q.answer)}${q.uncertain ? ' · 识别不确定，可查看原图' : ''}` : q.confirmed ? `已确认 · ${numberText(q.score)} / ${numberText(q.points)}` : `${q.machine_text ? `识别：${escapeHTML(q.machine_text.slice(0, 48))}` : '尚未取得本题作答，暂不判断对错'}${confidence !== null ? ` · 置信度 ${Math.round(confidence * 100)}%` : ''}`;
+  const summary = q.teacher_decision ? `${({correct:'教师判定正确',incorrect:'教师判定错误',blank:'教师确认未作答'})[q.teacher_decision]} · ${q.score==null?'待核对':numberText(q.score)} / ${numberText(q.points)} 分${q.transcript ? ` · 原转录：${escapeHTML(q.transcript)}` : ' · 未补录作答文字'}` : q.graded || q.auto_result ? `作答：${escapeHTML(q.transcript || (q.confirmed_blank ? '（教师确认未作答）' : q.auto_result?.diagnostic === 'ocr_no_answer' ? '（识别结果未返回作答文字）' : '（识别文字未能可靠关联本题）'))} · 标准答案：${escapeHTML(q.answer)}${q.uncertain ? ' · 识别不确定，可查看原图' : ''}` : q.confirmed ? `已确认 · ${q.score==null?'待核对':numberText(q.score)} / ${numberText(q.points)}` : `${q.machine_text ? `识别：${escapeHTML(q.machine_text.slice(0, 48))}` : '尚未取得本题作答，暂不判断对错'}${confidence !== null ? ` · 置信度 ${Math.round(confidence * 100)}%` : ''}`;
   const decisionLabel = {correct:'教师判定正确',incorrect:'教师判定错误',blank:'教师确认未作答'}[q.teacher_decision];
-  const body = active ? `<div class="review-body">${contextHTML(q)}<div class="expected quick-expected"><span class="muted">标准答案</span> <strong>${escapeHTML(q.answer)}</strong>${q.variants?.length ? `<div class="variants">可接受：${q.variants.map(escapeHTML).join(' / ')}</div>` : ''}</div><p class="machine">机器识别：${escapeHTML(q.auto_result?.transcript ?? q.machine_text) || '未取得作答文字，请查看左侧原图'}</p>${recognitionEvidenceHTML(q)}<div id="visual-review">${visualReviewHTML(q)}</div>${q.uncertain ? '<p class="quick-review-hint">请对照原图直接判定，无需先输入答案。</p>' : ''}${decisionLabel ? `<p class="notice teacher-verdict">${decisionLabel} · ${numberText(q.score)} / ${numberText(q.points)} 分。${q.confirmed_blank ? '' : '原始识别保留，未补录的文字不代表未作答。'}</p>` : ''}<div class="quick-verdict" aria-label="教师直接判定"><p class="tiny muted">${attentionContext?'核对原图后点击，即保存并进入下一项':'核对原图后点击即保存，留在当前题目'}</p><div class="quick-verdict-buttons"><button class="btn verdict-correct" data-action="quick-correct" data-id="${q.question_id}" ${state.busy || isGrading(state.submission) ? 'disabled' : ''}>${attentionContext?'判对并下一项':'判为正确'} · ${numberText(q.points)} 分</button><button class="btn verdict-incorrect" data-action="quick-incorrect" data-id="${q.question_id}" ${state.busy || isGrading(state.submission) ? 'disabled' : ''}>${attentionContext?'判错并下一项':'判为错误'} · 0 分</button><button class="btn" data-action="quick-blank" data-id="${q.question_id}" ${state.busy || isGrading(state.submission) ? 'disabled' : ''}>未作答 · 0 分</button></div></div><details class="review-details" ${dirty || (!q.auto_result && !q.graded && !q.teacher_decision) ? 'open' : ''}><summary>修改识别文字 / 部分给分 / 更多设置</summary><fieldset class="review-edit-fields" aria-label="修改本题作答与分数">${q.auto_result?.reason ? `<p class="tiny muted">识别说明：${escapeHTML(q.auto_result.reason)}</p>` : ''}<div class="region-label"><span>已关联 ${d.regions.length} 个段落参考区域</span><button class="text-button" data-action="clear-regions" data-id="${q.question_id}">清除关联</button></div><label class="field teacher-transcript"><span>教师确认转录 <small>评分依据</small></span><textarea data-field="transcript" aria-label="第 ${q.number} 题教师确认转录" rows="3" ${d.confirmed_blank ? 'disabled' : ''}>${escapeHTML(d.transcript)}</textarea></label>${!q.machine_text ? '<div class="notice warn">机器识别为空，不等于学生未作答。请对照原图确认。</div>' : ''}${dirty ? '<div class="diff">已修改，请保存后更新差异与得分。</div>' : `<div class="diff" aria-label="文字差异">${q.teacher_decision ? '教师已按原图判定，本题成绩不依赖机器转录。' : waiting ? '尚未取得本题作答，暂不比较答案。' : diffHTML(q.diff)}</div>`}<label class="inline-check"><input type="checkbox" data-field="confirmed_blank" ${d.confirmed_blank ? 'checked' : ''}>经原图核对，确认本题未作答</label><div class="manual-row"><label class="field">手动分数（选填）<input data-field="score_override" type="number" min="0" max="${q.points}" step="0.01" placeholder="自动评分" value="${d.score_override ?? ''}"></label><label class="field">改分理由（改分时必填）<input data-field="reason" maxlength="1000" placeholder="例如：原卷书写正确，识别有误" value="${escapeHTML(d.reason)}"></label></div><div class="review-actions"><button class="btn small" data-action="save-review" data-id="${q.question_id}" ${state.busy ? 'disabled' : ''}>${q.auto_result || q.graded ? '保存修改（立即更新成绩）' : '保存草稿'}</button><button class="btn small primary" data-action="confirm-review" data-id="${q.question_id}" ${state.busy ? 'disabled' : ''}>确认本题并保存 ✓</button>${attentionQueue ? `<button class="btn small primary" data-action="save-next-attention" data-id="${q.question_id}">保存并下一条异常</button>` : ''}<button class="text-button" data-action="defer-review" data-id="${q.question_id}">跳过本题</button></div></fieldset></details></div>` : `<div class="review-summary">${summary}<button class="btn small" data-action="focus-question" data-id="${q.question_id}">查看并处理 →</button></div>`;
-  return `<article class="review-card ${active ? 'active' : ''} ${q.confirmed ? 'is-confirmed' : ''}" data-question-id="${q.question_id}"><div class="review-head" data-action="focus-question" data-id="${q.question_id}" tabindex="0" role="button" aria-label="查看第 ${q.number} 题 · ${escapeHTML(fullStatus)}"><h3><span class="question-number">${String(q.number).padStart(2,'0')}</span> ${kindNames[q.kind] || '题目'} ${badge(status,statusClass,`data-review-state ${status?'':'hidden'} title="${escapeHTML(fullStatus)}"`)}</h3><span class="score">${waiting ? '—' : numberText(q.score)}<small> / ${numberText(q.points)}</small></span></div>${body}</article>`;
+  const body = active ? `<div class="review-body">${contextHTML(q)}<div class="expected quick-expected"><span class="muted">标准答案</span> <strong>${escapeHTML(q.answer)}</strong>${q.variants?.length ? `<div class="variants">可接受：${q.variants.map(escapeHTML).join(' / ')}</div>` : ''}</div><p class="machine">机器识别：${escapeHTML(q.auto_result?.transcript ?? q.machine_text) || '未取得作答文字，请查看左侧原图'}</p>${recognitionEvidenceHTML(q)}<div id="visual-review">${visualReviewHTML(q)}</div>${q.uncertain ? '<p class="quick-review-hint">请对照原图直接判定，无需先输入答案。</p>' : ''}${decisionLabel ? `<p class="notice teacher-verdict">${decisionLabel} · ${q.score==null?'待核对':numberText(q.score)} / ${numberText(q.points)} 分。${q.confirmed_blank ? '' : '原始识别保留，未补录的文字不代表未作答。'}</p>` : ''}<div class="quick-verdict" aria-label="教师直接判定"><p class="tiny muted">${attentionContext?'核对原图后点击，即保存并进入下一项':'核对原图后点击即保存，留在当前题目'}</p><div class="quick-verdict-buttons"><button class="btn verdict-correct" data-action="quick-correct" data-id="${q.question_id}" ${state.busy || isGrading(state.submission) ? 'disabled' : ''}>${attentionContext?'判对并下一项':'判为正确'} · ${numberText(q.points)} 分</button><button class="btn verdict-incorrect" data-action="quick-incorrect" data-id="${q.question_id}" ${state.busy || isGrading(state.submission) ? 'disabled' : ''}>${attentionContext?'判错并下一项':'判为错误'} · 0 分</button><button class="btn" data-action="quick-blank" data-id="${q.question_id}" ${state.busy || isGrading(state.submission) ? 'disabled' : ''}>未作答 · 0 分</button></div></div><details class="review-details" ${dirty || (!q.auto_result && !q.graded && !q.teacher_decision) ? 'open' : ''}><summary>修改识别文字 / 部分给分 / 更多设置</summary><fieldset class="review-edit-fields" aria-label="修改本题作答与分数">${q.auto_result?.reason ? `<p class="tiny muted">识别说明：${escapeHTML(q.auto_result.reason)}</p>` : ''}<div class="region-label"><span>已关联 ${d.regions.length} 个段落参考区域</span><button class="text-button" data-action="clear-regions" data-id="${q.question_id}">清除关联</button></div><label class="field teacher-transcript"><span>教师确认转录 <small>评分依据</small></span><textarea data-field="transcript" aria-label="第 ${q.number} 题教师确认转录" rows="3" ${d.confirmed_blank ? 'disabled' : ''}>${escapeHTML(d.transcript)}</textarea></label>${!q.machine_text ? '<div class="notice warn">机器识别为空，不等于学生未作答。请对照原图确认。</div>' : ''}${dirty ? '<div class="diff">已修改，请保存后更新差异与得分。</div>' : `<div class="diff" aria-label="文字差异">${q.teacher_decision ? '教师已按原图判定，本题成绩不依赖机器转录。' : waiting ? '尚未取得本题作答，暂不比较答案。' : diffHTML(q.diff)}</div>`}<label class="inline-check"><input type="checkbox" data-field="confirmed_blank" ${d.confirmed_blank ? 'checked' : ''}>经原图核对，确认本题未作答</label><div class="manual-row"><label class="field">手动分数（选填）<input data-field="score_override" type="number" min="0" max="${q.points}" step="0.01" placeholder="自动评分" value="${d.score_override ?? ''}"></label><label class="field">改分理由（改分时必填）<input data-field="reason" maxlength="1000" placeholder="例如：原卷书写正确，识别有误" value="${escapeHTML(d.reason)}"></label></div><div class="review-actions"><button class="btn small" data-action="save-review" data-id="${q.question_id}" ${state.busy ? 'disabled' : ''}>${q.auto_result || q.graded ? '保存修改（立即更新成绩）' : '保存草稿'}</button><button class="btn small primary" data-action="confirm-review" data-id="${q.question_id}" ${state.busy ? 'disabled' : ''}>确认本题并保存 ✓</button>${attentionQueue ? `<button class="btn small primary" data-action="save-next-attention" data-id="${q.question_id}">保存并下一条异常</button>` : ''}<button class="text-button" data-action="defer-review" data-id="${q.question_id}">跳过本题</button></div></fieldset></details></div>` : `<div class="review-summary">${summary}<button class="btn small" data-action="focus-question" data-id="${q.question_id}">查看并处理 →</button></div>`;
+  return `<article class="review-card ${active ? 'active' : ''} ${q.confirmed ? 'is-confirmed' : ''}" data-question-id="${q.question_id}"><div class="review-head" data-action="focus-question" data-id="${q.question_id}" tabindex="0" role="button" aria-label="查看第 ${q.number} 题 · ${escapeHTML(fullStatus)}"><h3><span class="question-number">${String(q.number).padStart(2,'0')}</span> ${kindNames[q.kind] || '题目'} ${badge(status,statusClass,`data-review-state ${status?'':'hidden'} title="${escapeHTML(fullStatus)}"`)}</h3><span class="score">${q.score==null?'待核对':waiting?'—':numberText(q.score)}<small> / ${numberText(q.points)}</small></span></div>${body}</article>`;
 }
 function diffHTML(diff = []) {
   return diff.map(part => {
@@ -807,7 +806,7 @@ function renderSubmission() {
   const repairControls = canExtract ? `<button class="btn" data-action="repair-recognition" ${state.busy ? 'disabled' : ''}>修复识别问题</button><details class="more-operations"><summary>更多识别操作</summary><button class="btn" data-action="reextract-answers" ${state.busy ? 'disabled' : ''}>重新分题（不调用识别）</button>${missingAnswer ? `<button class="btn" data-action="retry-missing" ${state.busy ? 'disabled' : ''}>补识别未取得作答</button><p class="muted">仅补识别可定位的缺失作答区域，每页成功补识别一次；使用云端时可能消耗额度。仍未取得作答可对照原图改判。</p>` : ''}</details>` : '';
   $('#breadcrumb').textContent = `工作台 / ${sub.task_name} / ${sub.student_code}`;
   $('#main').innerHTML = heading(`${identity ? `${identity.name}（${identity.student_code}）` : sub.student_code}`, `${identity ? `${identity.class_name} · ${identity.term} · ` : ''}${sub.task_name}`, `<div class="button-row"><button class="btn" data-action="return-context">${escapeHTML(Nav.returnInfo().label)}</button><details class="action-menu"><summary class="btn">更多操作</summary><div class="action-menu-content"><a class="btn" href="/api/submissions/${sub.id}/history" target="_blank" rel="noopener">修改记录</a><a class="btn" href="/submissions/${sub.id}/report" target="_blank" rel="noopener">打印批改报告</a></div></details></div>`) +
-    `${attentionNavigation()}<div class="submission-recognition" role="status">${recognitionHTML(sub,attentionContext?.scope||'task')}${recognitionFor(sub).state==='completed'?'<span class="muted tiny">可按需抽查原图</span>':''}</div><div class="summary-strip review-summary-strip" aria-live="polite"><span><strong>${numberText(sub.score)} / ${numberText(sub.total_points)}</strong> ${sub.is_final || sub.status === 'confirmed' ? '最终成绩' : '尚未完成批改'}</span><span><strong>${sub.correct_count ?? sub.reviews.filter(q => (q.graded || q.confirmed) && Number(q.score) >= Number(q.points)).length}</strong> 正确 · <strong>${sub.wrong_count ?? sub.reviews.filter(q => (q.graded || q.confirmed) && Number(q.score) < Number(q.points)).length}</strong> 错误 · <strong>${recognitionFor(sub).uncertain_count}</strong> 不确定</span><span class="muted tiny">${escapeHTML(sub.grading_source || (sub.status === 'confirmed' ? '教师复核' : '等待自动批改'))}</span><span>机器批改 ${sub.machine_graded_count || 0} 题 · 教师复核 ${sub.teacher_reviewed_count ?? sub.confirmed_count} 题</span></div><div class="grading-status" role="status">${isGrading(sub) ? `<p class="running-bar"><span class="spinner"></span>${sub.processing_job?.state==='queued'?'已排队，等待后台批改':'后台正在批改'}；完成后可修改，可以离开页面。刷新只读取进度，不重复识别。</p>` : sub.grading_state === 'failed' ? `<p class="notice error">自动批改失败：${escapeHTML(sub.grading_error || '请重试')}。已保存的原图和修改保留。</p>` : ''}${sub.pages.length && !isGrading(sub) ? `<button class="btn ${sub.is_final || sub.status === 'confirmed' ? '' : 'primary'}" data-action="auto-grade" ${state.busy ? 'disabled' : ''}>${sub.grading_state === 'failed' ? '重试自动批改' : sub.is_final || sub.status === 'confirmed' ? '重新自动批改' : '开始自动批改'}</button>` : ''}${sub.processing_job?.state==='interrupted'?'<p class="notice warn">上次处理已中断，点击“开始／重新自动批改”可继续；不会在刷新时重新提交。</p>':''}${repairControls}${sub.pages.filter(p => p.status === 'done' && p.error).map(p => `<p class="notice warn">${escapeHTML(p.error)}</p>`).join('')}</div>${sub.is_final || sub.status === 'confirmed' ? `<button class="btn result-view-toggle" data-action="toggle-evidence">${overview ? '查看原图 / 添加照片' : '返回成绩概览'}</button>` : ''}<div class="review-layout ${overview ? 'result-overview' : ''}"><section class="card review-image-card" ${overview ? 'hidden' : ''}><div class="card-header"><div><h2>学生答卷原图</h2><p>识别框可能覆盖整段；点击文字块，或手动框选作答区域</p></div><span class="badge blue">原图核对</span></div><div id="photo-panel"></div></section><section aria-label="逐题复核"><div class="review-controls" aria-label="题目结果筛选"><div class="review-control-actions"><select id="review-order" aria-label="题目排序"><option value="priority">优先处理需判断题目</option><option value="number">按题号查看</option></select><select id="review-filter" aria-label="筛选题目"><option value="all">全部题目</option><option value="wrong">错题</option><option value="uncertain">不确定</option><option value="different">有差异（人工批改）</option><option value="pending">未人工核对（可选）</option><option value="confirmed">教师已核对</option></select></div></div><div id="unassigned-ocr"></div><div id="review-list" class="review-list"></div></section></div>`;
+    `${attentionNavigation()}<div class="submission-recognition" role="status">${recognitionHTML(sub,attentionContext?.scope||'task')}${recognitionFor(sub).state==='completed'?'<span class="muted tiny">可按需抽查原图</span>':''}</div><div class="summary-strip review-summary-strip" aria-live="polite"><span><strong>${sub.score==null?'—':numberText(sub.score)} / ${numberText(sub.total_points)}</strong> ${sub.is_final || sub.status === 'confirmed' ? '最终成绩' : '尚未完成批改'}</span><span><strong>${sub.correct_count ?? sub.reviews.filter(q => (q.graded || q.confirmed) && Number(q.score) >= Number(q.points)).length}</strong> 正确 · <strong>${sub.wrong_count ?? sub.reviews.filter(q => (q.graded || q.confirmed) && Number(q.score) < Number(q.points)).length}</strong> 错误 · <strong>${recognitionFor(sub).uncertain_count}</strong> 不确定</span><span class="muted tiny">${escapeHTML(sub.grading_source || (sub.status === 'confirmed' ? '教师复核' : '等待自动批改'))}</span><span>机器批改 ${sub.machine_graded_count || 0} 题 · 教师复核 ${sub.teacher_reviewed_count ?? sub.confirmed_count} 题</span></div><div class="grading-status" role="status">${isGrading(sub) ? `<p class="running-bar"><span class="spinner"></span>${sub.processing_job?.state==='queued'?'已排队，等待后台批改':'后台正在批改'}；完成后可修改，可以离开页面。刷新只读取进度，不重复识别。</p>` : sub.grading_state === 'failed' ? `<p class="notice error">自动批改失败：${escapeHTML(sub.grading_error || '请重试')}。已保存的原图和修改保留。</p>` : ''}${sub.pages.length && !isGrading(sub) ? `<button class="btn ${sub.is_final || sub.status === 'confirmed' ? '' : 'primary'}" data-action="auto-grade" ${state.busy ? 'disabled' : ''}>${sub.grading_state === 'failed' ? '重试自动批改' : sub.is_final || sub.status === 'confirmed' ? '重新自动批改' : '开始自动批改'}</button>` : ''}${sub.processing_job?.state==='interrupted'?'<p class="notice warn">上次处理已中断，点击“开始／重新自动批改”可继续；不会在刷新时重新提交。</p>':''}${repairControls}${sub.pages.filter(p => p.status === 'done' && p.error).map(p => `<p class="notice warn">${escapeHTML(p.error)}</p>`).join('')}</div>${sub.is_final || sub.status === 'confirmed' ? `<button class="btn result-view-toggle" data-action="toggle-evidence">${overview ? '查看原图 / 添加照片' : '返回成绩概览'}</button>` : ''}<div class="review-layout ${overview ? 'result-overview' : ''}"><section class="card review-image-card" ${overview ? 'hidden' : ''}><div class="card-header"><div><h2>学生答卷原图</h2><p>识别框可能覆盖整段；点击文字块，或手动框选作答区域</p></div><span class="badge blue">原图核对</span></div><div id="photo-panel"></div></section><section aria-label="逐题复核"><div class="review-controls" aria-label="题目结果筛选"><div class="review-control-actions"><select id="review-order" aria-label="题目排序"><option value="priority">优先处理需判断题目</option><option value="number">按题号查看</option></select><select id="review-filter" aria-label="筛选题目"><option value="all">全部题目</option><option value="wrong">错题</option><option value="uncertain">不确定</option><option value="different">有差异（人工批改）</option><option value="pending">未人工核对（可选）</option><option value="confirmed">教师已核对</option></select></div></div><div id="unassigned-ocr"></div><div id="review-list" class="review-list"></div></section></div>`;
   $('#main').classList.add('submission-page');
   const layout=$('.review-layout'),tools=document.createElement('div');tools.className='review-workspace-bar';
   layout.before(tools);
@@ -825,7 +824,7 @@ function renderSubmission() {
     maintenance.querySelectorAll('details').forEach(group=>{const section=document.createElement('div');section.className='review-maintenance-group';[...group.children].filter(node=>node.tagName!=='SUMMARY').forEach(node=>section.append(node));group.replaceWith(section);});
     $('.page-heading .action-menu-content').append(maintenance);
   }
-  renderPhoto(viewport); renderReviews();updateReviewLock();
+  renderPhoto(viewport); renderReviews();Translation.mountSubmission();updateReviewLock();
 }
 function renderReviews() {
   const questions = reviewQuestions();
@@ -946,6 +945,8 @@ function renderDraftActions() {
   setButtonBusy(button,!!result?.running);
 }
 async function saveAllReviews() {
+  if(Writing.hasDirty())await Writing.saveDrafts();
+  if(Translation.hasDirty())await Translation.saveDrafts();
   if(isGrading(state.submission))throw new Error('答卷正在处理，完成后可修改。');
   const entries=state.submission.reviews.filter(q=>state.drafts.has(q.question_id)).sort((a,b)=>a.number-b.number).map(q=>[q.question_id,reviewDraft(q)]);
   if(!entries.length)return;
@@ -1040,11 +1041,15 @@ async function associate(blocks, box = null) {
   const q = state.submission.reviews.find(item => item.question_id === state.activeQuestion);
   if (!q) throw new Error('请先选择右侧的题目。');
   if (!blocks.length && !box) throw new Error('请先选择文字块，或框选作答区域。');
-  const card = $(`[data-question-id="${q.question_id}"]`);
-  const d = card ? captureDraft(card) : {...reviewDraft(q)};
   const regionBox = box || [Math.min(...blocks.map(b => b.box[0])),Math.min(...blocks.map(b => b.box[1])),Math.max(...blocks.map(b => b.box[2])),Math.max(...blocks.map(b => b.box[3]))];
   const region = {page_id:state.pageId,box:regionBox.map(Math.round),block_ids:blocks.map(b => b.id)};
   const text = stripQuestionPrefix(blocks.map(b => b.text).join('\n'),q.number);
+  if(Writing.isWriting(q.kind)) {
+    await Writing.associate(q.question_id,text,region);
+    state.selected.clear();renderPhoto();toast('已关联并保存写作转录，请核对后生成评分建议。');return;
+  }
+  const card = $(`[data-question-id="${q.question_id}"]`);
+  const d = card ? captureDraft(card) : {...reviewDraft(q)};
   const next = {...d,regions:[...d.regions,region],transcript:[d.transcript,text].filter(Boolean).join('\n'),confirmed_blank:false};
   state.drafts.set(q.question_id,next);
   await saveReview(q.question_id,false,next);
@@ -1057,7 +1062,7 @@ async function busyAction(button, action) {
   setButtonBusy(button,true);clearActionError(button);
   try { await action(); }
   catch (error) { toast(error.message,true);showActionError(button,error); }
-  finally { state.busy = false; state.ocrProgress = null;setButtonBusy(button,false); if (button?.isConnected) button.disabled = false; if (state.submission && $('#photo-panel')) renderPhoto();updateReviewLock(); }
+  finally { state.busy = false; state.ocrProgress = null;setButtonBusy(button,false); if (button?.isConnected) button.disabled = false; if (state.submission && $('#photo-panel')) renderPhoto();updateReviewLock();if(state.submission?.reviews?.some(q=>Writing.isWriting(q.kind)))renderReviews(); }
 }
 
 document.addEventListener('click', async event => {
@@ -1103,6 +1108,7 @@ document.addEventListener('click', async event => {
   if (action === 'preview-answer-word') { await busyAction(button,previewAnswerWord); return; }
   if (action === 'apply-answer-word') { await busyAction(button,applyAnswerWord); return; }
   if (action === 'preview-word') { await busyAction(button,previewWord); return; }
+  if (action === 'preview-word-ai') { await busyAction(button,()=>previewWord(true)); return; }
   if (action === 'add-row') { $('#answer-rows').insertAdjacentHTML('beforeend',answerRow(Math.max(0,...$$('#answer-rows .number-input').map(input=>Number(input.value)))+1)); state.newTaskDirty = true; updateEditorTotal(); return; }
   if (action === 'remove-row') { button.closest('tr').remove(); state.newTaskDirty = true; updateEditorTotal(); return; }
   if (action === 'paste-rows') {
@@ -1354,4 +1360,15 @@ document.addEventListener('click',event=>{
   if(button.dataset.action==='reset-recognition-list')updateRecognitionView(recognitionList.scope,'view','all');
   $(`[data-recognition-search="${recognitionList.scope}"]`)?.focus();
  }
+});
+
+document.addEventListener('submit',async event=>{
+  if(event.target.id!=='paper-mapping-form')return;
+  event.preventDefault();const form=event.target,button=$('button[type=submit]',form),status=$('[data-paper-status]',form);
+  button.disabled=true;
+  try{
+    const questions=$$('[data-paper-question]',form).map(row=>({question_id:Number(row.dataset.paperQuestion),paper_section:$('[data-paper-section]',row).value.trim(),paper_number:$('[data-paper-number]',row).value,context:$('[data-paper-context]',row).value}));
+    await api(`/api/tasks/${form.dataset.taskId}/paper-mapping`,{method:'POST',body:{questions}});
+    status.textContent='已保存。已有答卷请使用“重新分题”，不会重新调用云端识别。';
+  }catch(error){status.textContent=error.message;}finally{button.disabled=false;}
 });

@@ -23,17 +23,18 @@
 <h1>{{ task.name }} · 默写答题纸</h1><p>学生编号：________________　姓名：________________　日期：________________</p>
 <p class="hint">按老师要求作答，每道题在对应区域内书写。此纸不显示标准答案。</p>
 {% if task.passage %}<p class="hint">{{ task.instructions }}</p><div style="white-space:pre-wrap">{{ task.passage }}</div><h2>按题号填写答案</h2>{% endif %}
-{% for q in task.questions %}<div class="question"><span class="number">{{ q.number }}.</span>　<span class="muted">{{ {'word':'单词','phrase':'短语','sentence':'句子','grammar':'语法填空'}[q.kind] }} · {{ q.points }} 分</span>{% if q.hint %}　提示词：{{ q.hint }}{% endif %}
-{% for _ in range(3 if q.kind == 'sentence' else 1) %}<div class="line"></div>{% endfor %}</div>{% endfor %}
+{% for q in task.questions %}<div class="question"><span class="number">{{ q.number }}.</span>　<span class="muted">{{ {'word':'单词','phrase':'短语','sentence':'句子','grammar':'语法填空','summary_cloze':'概要填空','summary':'概要写作','essay':'作文'}[q.kind] }} · {{ q.points }} 分</span>{% if q.scoring_mode|default('strict') == 'translation' %}<p>{{ q.source_text }}</p>{% endif %}{% if q.hint %}　提示词：{{ q.hint }}{% endif %}
+{% if q.kind in ('summary_cloze','summary','essay') %}<p style="white-space:pre-wrap">{{ q.writing_config.get('source_passage','') }}</p><p style="white-space:pre-wrap">{{ q.context }}</p><p>{{ q.writing_config.get('requirements','') }}</p>{% endif %}
+{% for _ in range(10 if q.kind in ('summary_cloze','summary','essay') else 3 if q.kind == 'sentence' else 1) %}<div class="line"></div>{% endfor %}</div>{% endfor %}
 {% else %}
 <div class="tools"><button onclick="window.print()">打印 / 保存 PDF</button><a href="/submissions/{{ submission.id }}">返回复核</a></div>
 <h1>{{ submission.task_name }} · 默写批改报告</h1>
 <p>学生编号：{{ submission.student_code }}　作业编号：{{ submission.id }}</p>
 {% if submission.identity %}<p>姓名：{{ submission.identity.name }}　班级：{{ submission.identity.class_name }}　学年 / 学期：{{ submission.identity.term }}</p>{% endif %}
-<h2>{{ '最终成绩' if submission.is_final else ('批改失败' if submission.grading_state == 'failed' else '暂定成绩') }}：{{ submission.score }} / {{ submission.total_points }}</h2>
+<h2>{{ '最终成绩' if submission.is_final else ('批改失败' if submission.grading_state == 'failed' else '暂定成绩') }}：{{ submission.score if submission.score is not none else '待教师确认' }} / {{ submission.total_points }}</h2>
 <p class="hint">批改来源：{{ submission.grading_source }}。机器批改 {{ submission.machine_graded_count }} 题，教师已复核 {{ submission.teacher_reviewed_count }}/{{ submission.question_count }} 题，不确定 {{ submission.uncertain_count }} 题。{{ submission.rules.description }} 规则版本：{{ submission.rules.version }}。</p>
 {% if submission.grading_error %}<p>{{ submission.grading_error }}</p>{% endif %}
-{% for r in submission.reviews %}<section class="report-question"><strong>第 {{ r.number }} 题 · {{ r.score }}/{{ r.points }} 分 · {{ '教师已复核' if r.confirmed else ('机器已批改 · 不确定' if r.uncertain else ('机器已批改' if r.graded else '未批改')) }}</strong>
+{% for r in submission.reviews %}<section class="report-question"><strong>第 {{ r.number }} 题 · {{ r.score if r.score is not none else '待教师确认' }}/{{ r.points }} 分 · {{ '教师已复核' if r.confirmed else ('机器已批改 · 不确定' if r.uncertain else ('机器已批改' if r.graded else '未批改')) }}</strong>
 {% if r.context %}<p>题目上下文：{{ r.context }}</p>{% endif %}{% if r.hint %}<p>提示词：{{ r.hint }}</p>{% endif %}
 <p>标准答案：<span class="answer">{{ r.answer }}</span></p>
 {% if r.variants %}<p class="hint">可接受变体：{{ r.variants|join(' / ') }}</p>{% endif %}

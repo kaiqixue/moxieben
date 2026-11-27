@@ -235,6 +235,14 @@ class TenantIsolationTests(unittest.TestCase):
         response = self.post(self.b, f'/api/tasks/{task}/assignments', {'class_ids': [klass]})
         self.assertEqual(response.status_code, 404)
 
+    def test_paper_mapping_cannot_edit_another_teachers_task(self):
+        task = self.post(self.a, '/api/tasks', {'name': '卷面映射', 'questions': [
+            {'number': 1, 'kind': 'sentence', 'answer': 'She goes home.', 'points': 1}]}).json
+        payload = {'questions': [{'question_id': task['questions'][0]['id'],
+                    'paper_section': 'B', 'paper_number': '1'}]}
+        self.assertEqual(self.post(self.b, f"/api/tasks/{task['id']}/paper-mapping", payload).status_code, 404)
+        self.assertEqual(self.post(self.a, f"/api/tasks/{task['id']}/paper-mapping", payload).status_code, 200)
+
     def test_student_roster_and_assignment_are_isolated(self):
         klass = self.post(self.a, '/api/classes', {'name': '甲班'}).json['id']
         member = self.post(self.a, f'/api/classes/{klass}/members',
@@ -247,6 +255,7 @@ class TenantIsolationTests(unittest.TestCase):
             {'number': 1, 'kind': 'word', 'answer': 'book', 'points': 1}]}).json['id']
         assignment = self.post(self.a, f'/api/tasks/{task}/assignments',
                                {'class_ids': [klass]}).json['assignments'][0]['id']
+        self.assertIs(self.a.get(f'/api/assignments/{assignment}').json['has_translation'], False)
         self.assertEqual([item['id'] for item in self.a.get('/api/workbench/assignments').json['assignments']],
                          [assignment])
         self.assertEqual(self.b.get('/api/workbench/assignments').json['assignments'], [])

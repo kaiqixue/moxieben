@@ -43,17 +43,17 @@ def settings_keys(defaults=None):
     return {prefix + key: key for key in (DEFAULTS if defaults is None else defaults)}
 
 
-AI_DEFAULTS = dict(enabled=False, limit=8, base_url='', model='', api_key='')
+AI_DEFAULTS = dict(enabled=False, limit=None, base_url='', model='', api_key='')
 
 
 def read_ai_review(db):
     if current_app.config.get('PRODUCTION_MODE'):
         return dict(AI_DEFAULTS, **(current_app.config.get('VISUAL_REVIEW_CONFIG') or {}),
-                    enabled=current_app.config.get('AI_REVIEW_AUTO', False))
+                    enabled=current_app.config.get('AI_REVIEW_AUTO', False)) | {'limit':None}
     keys = settings_keys({'ai_review': ''})
     with db() as conn:
         found = conn.execute('SELECT value FROM settings WHERE key=?', (next(iter(keys)),)).fetchone()
-    return dict(AI_DEFAULTS, **(json.loads(found['value']) if found else {}))
+    return dict(AI_DEFAULTS, **(json.loads(found['value']) if found else {})) | {'limit':None}
 
 
 def public_ai_review(config):
@@ -111,10 +111,13 @@ def _chat(config, raw, prompt, max_tokens=4000, *, timeout=90):
     if config.get('outbound_hosts'):
         from production import validate_outbound_url
         validate_outbound_url(endpoint, config['outbound_hosts'])
-    payload = {'model': config['model'], 'messages': [{'role': 'user', 'content': [
-        {'type': 'text', 'text': prompt},
-        {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(raw).decode()}}
-    ]}], 'max_tokens': max_tokens}
+    content = [{'type': 'text', 'text': prompt}]
+    if raw is not None:
+        content.append({'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(raw).decode()}})
+    payload = {'model': config['model'], 'messages': [{'role': 'user', 'content': content}], 'max_tokens': max_tokens}
+    if raw is not None and urlsplit(endpoint).hostname == 'api.deepseek.com' and config['model'] in ('deepseek-flash','deepseek-pro'):
+        # Visual transcription needs original text, not a reasoning-token budget.
+        payload['thinking'] = {'type':'disabled'}
     req = urllib.request.Request(endpoint, data=json.dumps(payload).encode(),
         headers={'Authorization': 'Bearer ' + config['api_key'], 'Content-Type': 'application/json'}, method='POST')
     try:
@@ -175,11 +178,40 @@ class VisualReviewError(ValueError):
 
 
 def visual_error_code(error):
+    if isinstance(error, VisualReviewError):
+        return str(error) if str(error) in VISUAL_ERRORS else 'provider'
     message = str(error)
-    return ('authentication' if 'HTTP 401' in message or 'HTTP 403' in message else
-            'rate_limit' if 'HTTP 429' in message else
+    status = re.search(r'HTTP (\d{3})', message)
+    if status:
+        code = int(status[1])
+        return ({400:'request_rejected',401:'authentication',403:'authentication',
+                 404:'endpoint_or_model',413:'image_too_large',422:'request_rejected',429:'rate_limit'}.get(code)
+                or ('service_unavailable' if code >= 500 else 'provider'))
+    return ('configuration' if '先填写并保存' in message else
+            'output_truncated' if '截断' in message else
+            'empty_response' if '没有返回识别文字' in message else
             'network' if '超时' in message or '无法连接' in message else
             'response_format' if isinstance(error, json.JSONDecodeError) or '格式' in message or '响应' in message else 'provider')
+
+
+VISUAL_ERRORS = {
+    'authentication':'接口鉴权失败，请检查 API Key 和访问权限',
+    'rate_limit':'服务限流或额度不足，请检查余额及请求限制',
+    'network':'网络连接失败或等待超时',
+    'response_format':'模型返回格式不符合复读要求',
+    'output_truncated':'模型输出被截断，未取得完整复读结果',
+    'empty_response':'模型未返回作答文字，请检查图片能力和输出额度',
+    'configuration':'AI 地址、模型或 API Key 未配置完整',
+    'endpoint_or_model':'接口地址或模型名不存在（HTTP 404）',
+    'request_rejected':'服务拒绝请求，请检查模型和图片参数（HTTP 400/422）',
+    'image_too_large':'服务拒绝过大的图片请求（HTTP 413）',
+    'service_unavailable':'模型服务暂不可用（HTTP 5xx）',
+    'provider':'服务未取得有效结果，具体原因未记录',
+}
+
+
+def visual_error_message(code):
+    return VISUAL_ERRORS.get(code,VISUAL_ERRORS['provider'])
 
 
 def reread_page(config, png, numbers):
@@ -189,7 +221,7 @@ def reread_page(config, png, numbers):
               'status 仅 readable/unreadable/blank/ambiguous；看清时 transcript 保留原始拼写大小写，'
               '否则为空字符串。题号重复、位置不明时用 ambiguous；找不到的题可省略。')
     try:
-        content = _chat(config, png, prompt, min(8000, 150 * len(numbers) + 100), timeout=60)
+        content = _chat(config, png, prompt, min(8000, 2048 + 256 * len(numbers)), timeout=60)
     except ValueError as exc:
         raise VisualReviewError(visual_error_code(exc)) from None
     try:
@@ -300,9 +332,9 @@ def register_settings_routes(app, db):
             fail('AI 设置字段无效。')
         config = read_ai_review(db)
         if ('enabled' in payload and type(payload['enabled']) is not bool
-                or 'limit' in payload and (type(payload['limit']) is not int or not 1 <= payload['limit'] <= 100)
+                or 'limit' in payload and payload['limit'] is not None and (type(payload['limit']) is not int or not 1 <= payload['limit'] <= 100)
                 or 'clear_key' in payload and type(payload['clear_key']) is not bool):
-            fail('自动开关须为布尔值，每次最多复核 1 至 100 题。')
+            fail('AI 设置格式无效，自动开关须为布尔值。')
         for key in AI_DEFAULTS:
             if key not in payload:
                 continue
@@ -316,6 +348,8 @@ def register_settings_routes(app, db):
             config[key] = value
         if payload.get('clear_key'):
             config['api_key'] = ''
+        # Accept the legacy limit field without cutting off the assignment.
+        config['limit'] = None
         try:
             url = urlsplit(config['base_url'])
             if config['base_url'] and (url.scheme != 'https' or not url.hostname or url.username is not None
@@ -336,9 +370,12 @@ def register_settings_routes(app, db):
         image = io.BytesIO()
         Image.new('RGB', (64, 64), 'white').save(image, 'PNG')
         try:
-            reread_handwriting(config, image.getvalue(), 1)
+            reread_page(config, image.getvalue(), [1])
+        except (ValueError, OSError) as exc:
+            code = visual_error_code(exc)
+            return jsonify(ok=False, error=visual_error_message(code), error_code=code), 400
         except Exception:
-            return jsonify(ok=False, error='AI 图片接口测试失败，请检查图片支持、响应格式、凭据及额度。'), 400
+            return jsonify(ok=False, error=visual_error_message('provider'), error_code='provider'), 400
         return jsonify(ok=True, message='图片和结构化响应测试通过；真实手写准确率仍需验收。')
 
     @app.get('/api/settings')

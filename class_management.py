@@ -126,7 +126,8 @@ def register_class_routes(app, db, body, row, submission_detail, task_detail, su
         result['archived'] = bool(result['archived'])
         result['class_archived'] = bool(row(conn, 'classes', result['class_id'])['archived'])
         task = task_detail(conn, result['task_id'],include_submissions=False)
-        result.update(task_name=task['name'], total_points=task['total_points'])
+        result.update(task_name=task['name'], total_points=task['total_points'],
+                      has_translation=any(q.get('scoring_mode') == 'translation' for q in task['questions']))
         items = []
         counts = {k: 0 for k in ('expected', 'submitted', 'not_submitted', 'ocr_pending', 'review_pending', 'completed', 'exempt',
                                'attention_submissions', 'uncertain_questions', 'teacher_reviewed_questions',

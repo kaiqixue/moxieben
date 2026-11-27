@@ -167,17 +167,20 @@ class WebsiteTests(unittest.TestCase):
                 'confirmed_blank': False, 'score_override': None, 'reason': ''}
         res = self.post(f'/api/submissions/{sid}/reviews/{qid}', data)
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json['score'], 2)
+        self.assertIsNone(res.json['score'])
+        self.assertEqual(res.json['known_score'], 2)
         self.assertEqual(res.json['status'], 'pending')
         data['transcript'] = 'recieve'
         data['score_override'] = 1
         self.assertEqual(self.post(f'/api/submissions/{sid}/reviews/{qid}', data).status_code, 400)
         data['reason'] = '教师确认部分给分'
         res = self.post(f'/api/submissions/{sid}/reviews/{qid}', data)
-        self.assertEqual(res.json['score'], 1)
+        self.assertIsNone(res.json['score'])
+        self.assertEqual(res.json['known_score'], 0)
         self.assertEqual(res.json['history_count'], 2)
         other = self.factory({'TESTING': True, 'DATA_DIR': self.tmp.name}).test_client()
-        self.assertEqual(other.get(f'/api/submissions/{sid}').json['score'], 1)
+        self.assertIsNone(other.get(f'/api/submissions/{sid}').json['score'])
+        self.assertEqual(other.get(f'/api/submissions/{sid}').json['known_score'], 0)
         csv = other.get(f"/tasks/{task['id']}/grades.csv")
         self.assertEqual(csv.status_code, 200)
         self.assertIn('S001', csv.get_data(as_text=True))

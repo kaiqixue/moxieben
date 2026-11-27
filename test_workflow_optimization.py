@@ -33,7 +33,7 @@ class WorkflowOptimizationTests(unittest.TestCase):
             undone=self.post(f'/api/submissions/{sid}/reviews/{qid}/undo',{'event_id':event})
             self.assertEqual(undone.status_code,200,undone.json)
             self.assertEqual(undone.json['uncertain_count'],1)
-            self.assertEqual(undone.json['score'],0)
+            self.assertIsNone(undone.json['score'])
             with self.conn() as conn:
                 self.assertEqual(dict(conn.execute('SELECT * FROM reviews WHERE submission_id=?',(sid,)).fetchone()),before)
                 events=conn.execute('SELECT snapshot FROM review_events WHERE submission_id=? ORDER BY id',(sid,)).fetchall()
