@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import test_ocr_alignment
 import test_tenant_isolation
+from settings import reread_page as real_reread_page
 
 
 class AISettingsTests(unittest.TestCase):
@@ -29,9 +30,10 @@ class AISettingsTests(unittest.TestCase):
         self.assertEqual(self.a.patch(route, json=config).status_code, 403)
         self.assertEqual(self.a.patch(route, json=config, headers={'X-CSRF-Token': self.token(self.a),
             'Origin': 'https://foreign.example.test'}).status_code, 403)
-        with patch('settings.reread_handwriting', side_effect=ValueError(config['api_key'])):
+        with patch('settings.reread_page', side_effect=ValueError(config['api_key'])):
             failed=self.a.post(route+'/test', json={}, headers={'X-CSRF-Token': self.token(self.a)})
         self.assertEqual(failed.status_code,400)
+        self.assertEqual(failed.json['error_code'],'provider')
         self.assertNotIn(config['api_key'],failed.get_data(as_text=True))
         for invalid in ({'limit': True}, {'limit': 101}, {'enabled': 'yes'},
                         {'base_url': 'http://unsafe.test'}, {'unknown': 1}):
@@ -70,6 +72,85 @@ class AIReviewTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         return sid, detail
 
+    def test_background_page_review_covers_every_question_despite_legacy_limit(self):
+        self.prepare()
+        task=self.post('/api/tasks',dict(name='Ten synthetic answers',questions=[
+            dict(number=n,kind='word',answer='book',points=1) for n in range(1,11)])).json
+        sid=self.submission(task);page=self.image(sid).json
+        self.seed(sid,page['id'],[dict(id=n,text=f'{n}. book',box=[0,n*10,30,n*10+8],confidence=.95)
+                                 for n in range(1,11)],'done')
+        self.post(f'/api/submissions/{sid}/auto-grade',{})
+        with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
+            conn.execute('UPDATE reviews SET auto_result=? WHERE submission_id=?',
+                (json.dumps(dict(source='no_valid_answer',uncertain=True,processing_version=3,regions=[],transcript='')),sid))
+        self.client.patch('/api/settings/ai-review',json={'limit':1},headers=self.headers)
+        runner=self.app.extensions['grading_jobs'];job=runner.enqueue(submission_id=sid)
+        with patch('settings.reread_page',return_value=[dict(number=n,status='readable',transcript='book')
+                for n in range(1,11)]) as model,patch(
+                'settings.recognize_selected',side_effect=AssertionError('must reuse OCR')):
+            runner.drain()
+        self.assertEqual(model.call_args.args[2],list(range(1,11)))
+        result=self.client.get(f'/api/grading-jobs/{job["id"]}').json['job']
+        self.assertIn('生成建议 10 题',result['message'])
+        self.assertEqual(self.client.get(f'/api/submissions/{sid}').json['uncertain_count'],10)
+
+    def test_page_auto_decisions_preserve_sibling_suggestions_and_independent_undo(self):
+        for both_agree in (False,True):
+            with self.subTest(both_agree=both_agree):
+                sid,before=self.prepare();pid=before['pages'][0]['id']
+                q2=before['reviews'][1]
+                evidence=dict(source='localization_ocr',uncertain=True,processing_version=3,transcript='demand',
+                    regions=[dict(page_id=pid,box=[200,400,700,500],block_ids=[2])])
+                with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
+                    conn.execute('UPDATE reviews SET auto_result=? WHERE submission_id=? AND question_id=?',
+                        (json.dumps(evidence),sid,q2['question_id']))
+                runner=self.app.extensions['grading_jobs'];runner.enqueue(submission_id=sid)
+                with patch('settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what'),
+                        dict(number=2,status='readable',transcript='demand' if both_agree else 'other')]):
+                    runner.drain()
+                after=self.client.get(f'/api/submissions/{sid}').json
+                self.assertEqual(len(after['visual_suggestions']),2,'own audit events must not invalidate siblings')
+                self.assertEqual(after['uncertain_count'],0 if both_agree else 1)
+                for q in after['reviews'][:2 if both_agree else 1]:
+                    response=self.post(f'/api/submissions/{sid}/reviews/{q["question_id"]}/undo',
+                        dict(event_id=q['auto_result']['ai_review']['event_id']))
+                    self.assertEqual(response.status_code,200,response.json)
+                    self.assertTrue(next(r for r in response.json['reviews'] if r['question_id']==q['question_id'])['uncertain'])
+
+    def test_background_page_agreement_resolves_automatically_without_opening_question(self):
+        sid,before=self.prepare();runner=self.app.extensions['grading_jobs']
+        runner.enqueue(submission_id=sid)
+        with patch('settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]) as model:
+            runner.drain()
+        model.assert_called_once()
+        after=self.client.get(f'/api/submissions/{sid}').json;q=after['reviews'][0]
+        self.assertFalse(q['uncertain'])
+        self.assertFalse(q['teacher_edited'])
+        self.assertEqual(q['auto_result']['ai_review']['scope'],'page')
+        self.assertEqual(q['machine_text'],before['reviews'][0]['machine_text'])
+        self.assertEqual(q['score'],0,'agreement must not correct spelling to reference answer')
+        runner.enqueue(submission_id=sid)
+        with patch('settings.reread_page') as model:
+            runner.drain();model.assert_not_called()
+        response=self.post(f'/api/submissions/{sid}/reviews/{q["question_id"]}/undo',
+            {'event_id':q['auto_result']['ai_review']['event_id']})
+        self.assertEqual(response.status_code,200,response.json)
+        self.assertTrue(response.json['reviews'][0]['uncertain'])
+
+    def test_background_reuses_existing_readable_suggestion_without_another_model_call(self):
+        sid,before=self.prepare();qid=before['reviews'][0]['question_id']
+        with patch('settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]):
+            self.assertEqual(self.post(f'/api/submissions/{sid}/visual-reread-page',
+                dict(page_id=before['pages'][0]['id'])).status_code,200)
+        previous=self.client.get(f'/api/submissions/{sid}').json
+        self.assertTrue(previous['reviews'][0]['uncertain'])
+        runner=self.app.extensions['grading_jobs'];runner.enqueue(submission_id=sid)
+        with patch('settings.reread_page') as model:
+            runner.drain();model.assert_not_called()
+        after=self.client.get(f'/api/submissions/{sid}').json
+        self.assertFalse(after['reviews'][0]['uncertain'])
+        self.assertEqual(after['visual_suggestions'][str(qid)]['id'],previous['visual_suggestions'][str(qid)]['id'])
+
     def test_page_reread_without_crop_can_be_adopted_and_undone(self):
         sid, before = self.prepare()
         pid = before['pages'][0]['id']
@@ -89,17 +170,75 @@ class AIReviewTests(unittest.TestCase):
         self.assertEqual(self.post(f"/api/submissions/{sid}/reviews/{q['question_id']}/undo", dict(event_id=event)).status_code, 200)
 
     def test_page_parser_rejects_duplicate_numbers_and_hides_provider_errors(self):
-        from settings import reread_page
         config = dict(api_key='secret-test', model='test', base_url='https://vision.example.test/v1')
         item = dict(number=1, status='readable', transcript='why')
         with patch('settings._chat', return_value=json.dumps([item,item])):
             with self.assertRaises(ValueError):
-                reread_page(config, b'png', [1])
+                real_reread_page(config, b'png', [1])
         sid,before=self.prepare()
         with patch('settings.reread_page',side_effect=ValueError('secret-test')):
             response=self.post(f'/api/submissions/{sid}/visual-reread-page',dict(page_id=before['pages'][0]['id']))
         self.assertEqual(response.status_code,502)
         self.assertNotIn('secret-test',response.get_data(as_text=True))
+        result=self.client.get(f'/api/submissions/{sid}').json
+        suggestion=result['visual_suggestions'][str(before['reviews'][0]['question_id'])]
+        self.assertIn('error_message',suggestion)
+        self.assertNotIn('secret-test',suggestion['error_message'])
+
+    def test_page_content_failure_continues_batch_and_reports_incomplete(self):
+        from settings import VisualReviewError
+        sid,before=self.prepare()
+        with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
+            conn.execute('UPDATE reviews SET auto_result=? WHERE submission_id=?',
+                (json.dumps(dict(source='no_valid_answer',uncertain=True,processing_version=3,regions=[],transcript='')),sid))
+        runner=self.app.extensions['grading_jobs']
+        job=runner.enqueue(submission_id=sid)
+        with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
+            conn.execute('UPDATE grading_jobs SET grade_ids=? WHERE id=?',(json.dumps([sid,sid]),job['id']))
+        with patch('settings.reread_page',side_effect=VisualReviewError('output_truncated')) as model:
+            runner.drain()
+        self.assertEqual(model.call_count,2)
+        result=self.client.get(f"/api/grading-jobs/{job['id']}").json['job']
+        self.assertIn('输出被截断',result['message'])
+        self.assertTrue(result['ai_incomplete'])
+        with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn:
+            options=json.loads(conn.execute('SELECT options FROM grading_jobs WHERE id=?',(job['id'],)).fetchone()[0])
+        self.assertNotIn('stopped',options['ai_metrics'])
+        self.assertEqual(options['ai_metrics']['failed_pages'],2)
+
+    def test_page_reread_has_room_for_image_model_reasoning_and_json(self):
+        import settings
+        config=dict(api_key='secret',model='vision',base_url='https://vision.example.test/v1')
+        with patch('settings._chat',return_value='[]') as model:
+            real_reread_page(config,b'png',[1])
+        self.assertGreaterEqual(model.call_args.args[3],2048)
+
+    def test_authentication_failure_still_stops_remaining_paid_requests(self):
+        from settings import VisualReviewError
+        sid,_=self.prepare();runner=self.app.extensions['grading_jobs']
+        job=runner.enqueue(submission_id=sid)
+        with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
+            conn.execute('UPDATE grading_jobs SET grade_ids=? WHERE id=?',(json.dumps([sid,sid]),job['id']))
+        with patch('settings.reread_page',side_effect=VisualReviewError('authentication')) as model:
+            runner.drain()
+        model.assert_called_once()
+        result=self.client.get(f"/api/grading-jobs/{job['id']}").json['job']
+        self.assertTrue(result['ai_incomplete'])
+        self.assertLess(result['completed'],result['total'])
+        self.assertIn('已暂停后续 AI 请求',result['message'])
+
+    def test_failed_page_request_can_be_retried_in_a_new_job(self):
+        sid,before=self.prepare();runner=self.app.extensions['grading_jobs']
+        runner.enqueue(submission_id=sid)
+        with patch('settings.reread_page',side_effect=ValueError('synthetic failure')) as model:
+            runner.drain();model.assert_called_once()
+        self.assertTrue(self.client.get(f'/api/submissions/{sid}').json['reviews'][0]['uncertain'])
+        runner.enqueue(submission_id=sid)
+        with patch('settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]) as model:
+            runner.drain();model.assert_called_once()
+        after=self.client.get(f'/api/submissions/{sid}').json
+        self.assertFalse(after['reviews'][0]['uncertain'])
+        self.assertFalse(after['visual_suggestions'][str(before['reviews'][0]['question_id'])]['error_code'])
 
     def test_page_multi_results_and_concurrent_edit_are_version_protected(self):
         sid,before=self.prepare()
@@ -137,7 +276,7 @@ class AIReviewTests(unittest.TestCase):
         sid, before = self.prepare()
         runner = self.app.extensions['grading_jobs']
         job = runner.enqueue(submission_id=sid)
-        with patch('settings.reread_handwriting', return_value=dict(status='readable', transcript='what')) as model:
+        with patch('settings.reread_page', return_value=[dict(number=1,status='readable', transcript='what')]) as model:
             runner.drain()
             after = self.client.get(f'/api/submissions/{sid}').json
             q = after['reviews'][0]
@@ -162,8 +301,8 @@ class AIReviewTests(unittest.TestCase):
             sid, before = self.prepare()
             runner = self.app.extensions['grading_jobs']
             runner.enqueue(submission_id=sid)
-            kwargs = {'side_effect': result} if isinstance(result, Exception) else {'return_value': result}
-            with patch('settings.reread_handwriting', **kwargs):
+            kwargs = {'side_effect': result} if isinstance(result, Exception) else {'return_value': [dict(result,number=1)]}
+            with patch('settings.reread_page', **kwargs):
                 runner.drain()
             after = self.client.get(f'/api/submissions/{sid}').json
             self.assertTrue(after['reviews'][0]['uncertain'])
@@ -171,7 +310,7 @@ class AIReviewTests(unittest.TestCase):
         q = before['reviews'][0]
         self.post(f"/api/submissions/{sid}/reviews/{q['question_id']}", {'transcript': 'teacher', 'confirmed': True})
         runner.enqueue(submission_id=sid)
-        with patch('settings.reread_handwriting') as model:
+        with patch('settings.reread_page') as model:
             runner.drain()
             model.assert_not_called()
 
@@ -184,10 +323,10 @@ class AIReviewTests(unittest.TestCase):
             # Simulate a write already in flight before this job acquired its guards.
             with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
                 conn.execute('UPDATE reviews SET transcript=?,confirmed=1,teacher_edited=1 WHERE submission_id=? AND question_id=?',('teacher',sid,qid))
-            return dict(status='readable',transcript='what')
+            return [dict(number=1,status='readable',transcript='what')]
         runner=self.app.extensions['grading_jobs']
         runner.enqueue(submission_id=sid)
-        with patch('settings.reread_handwriting',side_effect=reply):
+        with patch('settings.reread_page',side_effect=reply):
             runner.drain()
         q=self.client.get(f'/api/submissions/{sid}').json['reviews'][0]
         self.assertEqual(q['transcript'],'teacher')
@@ -199,7 +338,7 @@ class AIReviewTests(unittest.TestCase):
         sid, _=self.prepare()
         runner=self.app.extensions['grading_jobs']
         runner.enqueue(submission_id=sid)
-        with patch('settings.reread_handwriting',return_value=dict(status='readable',transcript='what')) as model:
+        with patch('settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]) as model:
             runner.drain()
             restarted=create_app({'TESTING':True,'DATA_DIR':self.tmp.name,'CSRF_TOKEN':'test'})
             q=restarted.test_client().get(f'/api/submissions/{sid}').json['reviews'][0]
@@ -222,7 +361,7 @@ class AIReviewTests(unittest.TestCase):
         self.assertEqual(started.status_code,202,started.json)
         self.assertEqual(self.post(route,{}).json['job']['id'],started.json['job']['id'])
         with patch('settings.recognize_selected',side_effect=AssertionError('must not repeat OCR')),patch(
-                'settings.reread_handwriting',return_value=dict(status='readable',transcript='what')) as model:
+                'settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]) as model:
             self.app.extensions['grading_jobs'].drain()
             model.assert_called_once()
         self.assertFalse(self.client.get(f'/api/submissions/{sid}').json['reviews'][0]['uncertain'])
@@ -259,12 +398,31 @@ class AIReviewTests(unittest.TestCase):
         self.assertIn('生成建议 1 题',result['message'])
         self.assertIn('自动解决 0 题',result['message'])
         self.assertTrue(self.client.get(f'/api/submissions/{sid}').json['reviews'][0]['uncertain'])
-        runner.enqueue(submission_id=sid)
+        retry=runner.enqueue(submission_id=sid)
         with patch('settings.reread_page') as page_model:
             runner.drain()
             page_model.assert_not_called()
+        cached=self.client.get(f"/api/grading-jobs/{retry['id']}").json['job']
+        self.assertIn('新生成建议 0 题',cached['message'])
+        self.assertIn('复用已有建议 1 题',cached['message'])
+        self.assertIn('本次仍待确认 1 题',cached['message'])
+        self.assertNotIn('尝试复读',cached['message'])
 
-    def test_offline_localization_recovers_missing_region_without_regrading_original_ocr(self):
+    def test_historical_cached_summary_is_corrected_without_database_change(self):
+        from grading_jobs import GradingJobs
+        job=dict(id=1,assignment_id=1,submission_id=None,state='done',stage='ai_review',
+            message='AI 复核结束：尝试复读 18 题，图片请求 0 次，有效返回 0 次，生成建议 18 题，自动解决 0 题。剩余异常请对照原图核对。',
+            completed=1,total=1,errors='[]',created_at='now',updated_at='now',
+            options=json.dumps(dict(ai_used=18,ai_resolved=0,ai_metrics=dict(requests=0,valid=0,suggestions=18))))
+        original=dict(job)
+        result=GradingJobs.dto(job)
+        self.assertIn('新生成建议 0 题',result['message'])
+        self.assertIn('复用已有建议 18 题',result['message'])
+        self.assertIn('本次仍待确认 18 题',result['message'])
+        self.assertTrue(result['message'].endswith('剩余异常请对照原图核对。'))
+        self.assertEqual(job,original)
+
+    def test_page_review_reads_missing_region_without_repeating_ocr_or_guessing_identity(self):
         sid,before=self.prepare()
         q=before['reviews'][0]
         with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
@@ -275,29 +433,32 @@ class AIReviewTests(unittest.TestCase):
                 dict(id=1,text='(2) to demand that special rights be given today.',box=[200,400,700,440],confidence=.95)]
         runner=self.app.extensions['grading_jobs'];runner.enqueue(submission_id=sid)
         with patch('ai_localization.offline_blocks',return_value={pid:blocks}) as localizer,patch(
-                'settings.reread_handwriting',return_value=dict(status='readable',transcript='what')) as model,patch(
+                'settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]) as model,patch(
                 'settings.recognize_selected',side_effect=AssertionError('must not rerun cloud OCR')):
             runner.drain()
-            localizer.assert_called_once()
+            localizer.assert_not_called()
             model.assert_called_once()
         after=self.client.get(f'/api/submissions/{sid}').json
-        self.assertFalse(after['reviews'][0]['uncertain'])
+        self.assertTrue(after['reviews'][0]['uncertain'])
         self.assertFalse(after['reviews'][0]['teacher_edited'])
-        self.assertEqual(after['reviews'][0]['score'],0)
-        self.assertEqual(after['reviews'][0]['auto_result']['source'],'localization_ocr')
+        self.assertEqual(after['visual_suggestions'][str(q['question_id'])]['transcript'],'what')
+        self.assertEqual(after['reviews'][0]['auto_result']['source'],'no_valid_answer')
         self.assertEqual(after['pages'][0]['blocks'],before['pages'][0]['blocks'])
 
-    def test_duplicate_local_question_numbers_never_trigger_ai(self):
+    def test_duplicate_page_question_numbers_never_auto_confirm(self):
         sid,before=self.prepare()
         q=before['reviews'][0]
-        with closing(sqlite3.connect(Path(self.tmp.name)/'dictation.sqlite3')) as conn,conn:
-            conn.execute('UPDATE reviews SET auto_result=? WHERE submission_id=? AND question_id=?',
-                         (json.dumps(dict(source='no_valid_answer',uncertain=True,processing_version=3,regions=[],transcript='')),sid,q['question_id']))
-        block=dict(id=0,text='(1) what Western societies are known for this.',box=[200,100,700,140],confidence=.95)
+        blocks=before['pages'][0]['blocks']
+        blocks.append(dict(id=99,text='(1) another answer',box=[200,700,700,740],confidence=.95))
+        self.seed(sid,before['pages'][0]['id'],blocks,'done')
         runner=self.app.extensions['grading_jobs'];runner.enqueue(submission_id=sid)
-        with patch('ai_localization.offline_blocks',return_value={before['pages'][0]['id']:[block,dict(block,id=1)]}),patch('settings.reread_handwriting') as model:
+        with patch('settings.reread_page',return_value=[dict(number=1,status='readable',transcript='what')]) as model:
             runner.drain()
-            model.assert_not_called()
+            model.assert_called_once()
+        after=self.client.get(f'/api/submissions/{sid}').json
+        self.assertTrue(after['reviews'][0]['uncertain'])
+        self.assertNotIn('ai_review',after['reviews'][0]['auto_result'])
+        self.assertEqual(after['visual_suggestions'][str(q['question_id'])]['transcript'],'what')
 
 
 class AIJobPermissionTests(unittest.TestCase):

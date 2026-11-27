@@ -345,7 +345,7 @@ class IdentityMatchingTests(unittest.TestCase):
         self.assertNotEqual(new['submission_id'],sid)
         old=self.client.get(f'/api/submissions/{sid}').json
         self.assertFalse(old['is_final']);self.assertEqual(old['pages'],[])
-        self.assertEqual(old['score'],0)
+        self.assertIsNone(old['score'])
         self.assertTrue(self.post(f"/api/submissions/{new['submission_id']}/auto-grade",{}).json['is_final'])
         history=self.client.get(f'/api/submissions/{sid}/history').json['events']
         self.assertTrue(any(e['snapshot'].get('action')=='identity_reassigned' for e in history))

@@ -13,6 +13,7 @@ from test_ocr_alignment import OCRAlignmentTests
 case=OCRAlignmentTests()
 case.setUpClass()
 case.setUp()
+case.app.config['GRADING_JOBS_AUTOSTART']=True
 sid,page,blocks=case.setup_grammar(missing=True)
 blocks[2]['text']='They (2) a kind of code that special rights be given today.'
 case.seed(sid,page['id'],blocks,'done')

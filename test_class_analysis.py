@@ -37,7 +37,7 @@ class ClassAnalysisTests(unittest.TestCase):
             conn.execute('UPDATE assignment_students SET exempt=1 WHERE id=?',(self.assignment['students'][3]['id'],))
         report=self.analysis();q=report['questions'][0]
         self.assertEqual(report['counts']['expected'],3)
-        self.assertEqual(report['counts']['final'],3)
+        self.assertEqual(report['counts']['final'],2)
         self.assertEqual((q['wrong_count'],q['correct_count'],q['pending_count'],q['valid_count']),(1,1,1,2))
         self.assertEqual(q['wrong_rate'],50)
         self.assertEqual([r['submission_id'] for r in q['mistakes']],[sid])

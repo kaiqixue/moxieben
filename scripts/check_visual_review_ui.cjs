@@ -1,6 +1,7 @@
 // Test only with the synthetic recognition_evidence_ui_server fixture.
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const assert=require('node:assert/strict');
+const fs=require('node:fs');
 
 (async()=>{
   const base='http://127.0.0.1:'+Number(process.env.RECOGNITION_TEST_PORT||5033);
@@ -13,6 +14,9 @@ const assert=require('node:assert/strict');
   try {
     const path='/submissions/1?question=2&filter=uncertain';
     await page.goto(base+path);
+    await page.getByRole('region',{name:'AI 核对建议',exact:true}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'框选作答',exact:true}).isVisible(),false);
+    await page.getByText('重新识别',{exact:true}).click();
     await page.getByRole('button',{name:'框选作答'}).click();
     const stage=await page.locator('#photo-stage').boundingBox();
     await page.mouse.move(stage.x+stage.width*.18,stage.y+stage.height*.38);
@@ -21,32 +25,77 @@ const assert=require('node:assert/strict');
     await page.mouse.up();
     assert.deepEqual(writes,[]);
     await page.getByRole('button',{name:'发送局部图复读'}).click();
-    await page.locator('.visual-review img').waitFor();
-    await page.waitForFunction(()=>document.querySelector('.visual-review img')?.naturalWidth>0);
+    await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).waitFor();
+    assert.equal(await page.locator('.visual-review img').count(),0);
     assert.equal(await page.evaluate(()=>state.submission.reviews[1].uncertain),true);
     assert.deepEqual(writes,['/api/submissions/1/reviews/2/visual-reread']);
     await page.reload();
-    await page.locator('.visual-review img').waitFor();
+    await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).waitFor();
+    assert.equal(await page.getByRole('button',{name:'框选作答',exact:true}).isVisible(),false);
+    fs.mkdirSync('outputs/ai-review-simplification',{recursive:true});
+    for(const width of [1440,900,390]) {
+      await page.setViewportSize({width,height:width===390?844:1000});
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${width}px overflow`);
+      await page.locator('.visual-review').scrollIntoViewIfNeeded();
+      await page.screenshot({path:`outputs/ai-review-simplification/review-${width}.png`,fullPage:true});
+    }
+    await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).focus();
+    const scroll=await page.evaluate(()=>window.scrollY),count=writes.length;
+    await page.waitForTimeout(8500);
+    assert.equal(await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).evaluate(el=>el===document.activeElement),true);
+    assert.equal(await page.evaluate(()=>window.scrollY),scroll);
+    assert.equal(writes.length,count,'viewing a suggestion must not start another model request');
+    await page.emulateMedia({reducedMotion:'reduce'});
+    assert.equal(await page.locator('.visual-review').evaluate(el=>el.getAnimations({subtree:true}).length),0);
     await page.setViewportSize({width:390,height:844});
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
-    await page.getByRole('button',{name:'采纳复读建议'}).click();
+    await page.getByRole('button',{name:'采纳 AI 建议'}).click();
     await page.waitForFunction(()=>!state.busy && state.submission.reviews[1].confirmed);
     assert.equal(await page.evaluate(()=>state.submission.reviews[1].transcript),'demand');
     await page.locator('[data-action="undo-review"]').click();
     await page.waitForFunction(()=>!state.busy && state.submission?.reviews[1].uncertain);
     assert.deepEqual(errors,[]);
     assert.deepEqual(writes,['/api/submissions/1/reviews/2/visual-reread','/api/submissions/1/reviews/2','/api/submissions/1/reviews/2/undo']);
-    await page.getByRole('button',{name:'整页多题复读',exact:true}).click();
-    await page.getByRole('button',{name:'采纳复读建议',exact:true}).waitFor();
+    await page.getByText('重新识别',{exact:true}).click();
+    await page.getByRole('button',{name:'补读本页未完成题',exact:true}).click();
+    await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>state.submission.visual_suggestions[2].scope),'page');
     await page.reload();
-    await page.getByRole('button',{name:'采纳复读建议',exact:true}).waitFor();
+    await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).waitFor();
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
-    await page.getByRole('button',{name:'采纳复读建议',exact:true}).click();
+    await page.getByRole('button',{name:'采纳 AI 建议',exact:true}).click();
     await page.waitForFunction(()=>!state.busy && state.submission?.reviews[1].confirmed);
     await page.locator('[data-action="undo-review"]').click();
     await page.waitForFunction(()=>!state.busy && state.submission?.reviews[1].uncertain);
     assert.deepEqual(errors,[]);
-    console.log('PASS: crop, whole page, preview, refresh, adoption, undo, 390px');
+    await page.goto(base+'/settings');
+    await page.getByRole('heading',{name:'批改后自动 AI 复核',exact:true}).waitFor();
+    assert.equal(await page.locator('#ai-review-settings [name="limit"]').count(),0);
+    assert.equal(await page.locator('#ai-review-settings [name="enabled"]').isChecked(),true);
+    fs.mkdirSync('outputs/automatic-ai-review',{recursive:true});
+    await page.setViewportSize({width:1440,height:1000});
+    await page.screenshot({path:'outputs/automatic-ai-review/settings-desktop.png',fullPage:true});
+    await page.setViewportSize({width:390,height:844});
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+    await page.screenshot({path:'outputs/automatic-ai-review/settings-mobile.png',fullPage:true});
+    const writeCount=writes.length;
+    const queued=await page.evaluate(()=>api('/api/submissions/1/grading-jobs',{method:'POST',body:{}}));
+    let job;
+    for(let attempt=0;attempt<100;attempt++){
+      job=(await (await page.request.get(base+'/api/grading-jobs/'+queued.job.id)).json()).job;
+      if(['done','failed'].includes(job.state))break;
+      await page.waitForTimeout(100);
+    }
+    assert.equal(job.state,'done');
+    const automatic=await (await page.request.get(base+'/api/submissions/1')).json();
+    assert.equal(automatic.reviews[1].uncertain,false);
+    assert.equal(automatic.reviews[1].teacher_edited,false);
+    assert.equal(automatic.reviews[1].auto_result.ai_review.scope,'page');
+    assert.deepEqual(writes.slice(writeCount),['/api/submissions/1/grading-jobs']);
+    await page.goto(base+'/submissions/1?question=2');
+    await page.getByRole('button',{name:'撤销本次 AI 判定',exact:true}).waitFor();
+    await page.screenshot({path:'outputs/automatic-ai-review/background-result-mobile.png',fullPage:true});
+    assert.deepEqual(errors,[]);
+    console.log('PASS: compact suggestions, collapsed retries, crop, page, refresh, adoption, undo, background review, 1440/900/390px, 8.5s stable focus/scroll, reduced motion, no repeated cloud request');
   } finally { await browser.close(); }
 })().catch(error=>{console.error(error);process.exitCode=1;});

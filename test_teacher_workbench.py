@@ -54,7 +54,7 @@ class TeacherWorkbenchTests(unittest.TestCase):
         with self.conn() as conn, conn:
             conn.execute('INSERT INTO ocr_runs(page_id,created_at,success,result) VALUES(?,?,?,?)', (pid, '2026-10-25', success, json.dumps(result)))
 
-    def test_final_uncertainty_keeps_legacy_completion_and_wrong_answers_are_not_attention(self):
+    def test_uncertainty_stays_pending_and_wrong_answers_are_not_attention(self):
         sid, pid = self.page()
         sid2, pid2 = self.page(1)
         qid = self.task['questions'][0]['id']
@@ -66,14 +66,14 @@ class TeacherWorkbenchTests(unittest.TestCase):
         result = self.client.get(f"/api/assignments/{self.assignment['id']}/attention")
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json['summary']['uncertain_questions'], 1)
-        self.assertEqual(result.json['summary']['ungraded_submissions'], 0)
+        self.assertEqual(result.json['summary']['ungraded_submissions'], 1)
         self.assertEqual([(i['kind'], i['submission_id'], i['question_id']) for i in result.json['items']], [('question', sid, qid)])
         summary = self.client.get(f"/api/assignments/{self.assignment['id']}").json
-        self.assertEqual(summary['counts']['completed'], 2)
+        self.assertEqual(summary['counts']['completed'], 1)
         self.assertEqual(summary['counts']['attention_submissions'], 1)
         self.assertEqual(summary['counts']['uncertain_questions'], 1)
-        self.assertEqual(summary['students'][0]['state'], 'completed')
-        self.assertEqual(summary['students'][0]['score'], 0)
+        self.assertEqual(summary['students'][0]['state'], 'review_pending')
+        self.assertIsNone(summary['students'][0]['score'])
         self.post(f'/api/submissions/{sid}/reviews/{qid}', {'transcript': 'recieve', 'confirmed': True})
         self.assertEqual(self.client.get(f"/api/assignments/{self.assignment['id']}/attention").json['summary']['attention_count'], 0)
         self.assertEqual(self.client.get(f"/api/assignments/{self.assignment['id']}").json['counts']['teacher_reviewed_questions'], 1)
@@ -178,7 +178,7 @@ class TeacherWorkbenchTests(unittest.TestCase):
         self.assertEqual(before.json['summary']['uncertain_questions'],2)
         self.assertEqual({i['submission_id'] for i in before.json['items']},{sid,anonymous})
         summary=next(t for t in self.client.get('/api/tasks').json['tasks'] if t['id']==self.task['id'])
-        self.assertEqual(summary['completed_count'],2)
+        self.assertEqual(summary['completed_count'],0)
         self.assertEqual(summary['attention_count'],2)
         self.assertEqual(summary['uncertain_questions'],2)
         details=self.client.get(f"/api/tasks/{self.task['id']}").json

@@ -27,8 +27,8 @@ from ocr_engine import recognize, status as ocr_status
 from class_management import migrate, register_class_routes
 from batch_photos import migrate as migrate_batch_photos, register_batch_routes
 from settings import migrate as migrate_settings, register_settings_routes
-from word_import import migrate_word_fields, parse_answer_word, parse_word, WORD_LIMIT
-from answer_extraction import grammar_candidates, card_candidates, number_occurrences, reading_order
+from word_import import migrate_word_fields, parse_answer_word, parse_task_word, parse_task_word_ai, WORD_LIMIT
+from answer_extraction import grammar_candidates, card_candidates, number_occurrences, reading_order, worksheet_candidates
 import automatic_grading
 import grading_jobs
 import teacher_workbench
@@ -36,6 +36,7 @@ import task_deletion
 import class_analysis
 import student_id_band
 import teacher_auth
+import writing_grading
 
 ROOT = Path(__file__).resolve().parent
 IMAGE_LIMIT = 10 * 1024 * 1024
@@ -89,6 +90,23 @@ def upload_answer_layout():
     return layout
 
 
+def local_tenant_dir():
+    """Use the pinned local teacher database; never silently replace a missing pin."""
+    pin = ROOT / 'local-data-dir.txt'
+    if pin.exists():
+        directory = pin.read_text(encoding='utf-8-sig').strip()
+        if not directory or not Path(directory).is_absolute() or not (Path(directory) / 'dictation.sqlite3').is_file():
+            raise ValueError('固定的教师数据库未找到，请检查 local-data-dir.txt；未创建空数据库。')
+        return directory
+    if directory := os.environ.get('MOXIEBEN_TENANT_DIR'):
+        return directory
+    if local_app_data := os.environ.get('LOCALAPPDATA'):
+        directory = Path(local_app_data) / 'Moxieben' / 'TenantData'
+        if (directory / 'dictation.sqlite3').is_file():
+            return str(directory)
+    return None
+
+
 def create_app(config=None):
     app = Flask(__name__)
     app.config.update(DATA_DIR=str(ROOT / 'data'), CSRF_TOKEN=secrets.token_hex(32),
@@ -96,7 +114,7 @@ def create_app(config=None):
     if config:
         app.config.update(config)
     if config is None:
-        if tenant_dir := os.environ.get('MOXIEBEN_TENANT_DIR'):
+        if tenant_dir := local_tenant_dir():
             app.config.update(DATA_DIR=tenant_dir, TEACHER_TENANT_MODE=True)
         elif preview_dir := os.environ.get('MOXIEBEN_ACCOUNT_PREVIEW_DIR'):
             app.config.update(DATA_DIR=preview_dir, TEACHER_ACCOUNT_PREVIEW=True)
@@ -120,6 +138,8 @@ def create_app(config=None):
             raise ValueError('本地登录密钥无效，请先检查数据目录。')
         app.secret_key = local_key
     database = data_dir / ('accounts.sqlite3' if account_preview else 'dictation.sqlite3')
+    app.logger.info('SQLite database: %s', database.resolve())
+    translation_new_database = not database.exists()
     if tenant_mode and database.exists():
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as existing:
             tables = {record[0] for record in existing.execute(
@@ -352,7 +372,8 @@ def create_app(config=None):
             if request.path == '/settings' and app.config.get('PRODUCTION_MODE'):
                 fail('识别服务由平台统一配置。', 403)
             enabled = {'index', 'list_classes', 'create_class', 'get_class', 'update_class',
-                       'list_tasks', 'import_word', 'new_task', 'get_task', 'new_submission', 'upload', 'create_assignments',
+                       'list_tasks', 'import_word', 'new_task', 'get_task', 'save_paper_mapping', 'new_submission', 'upload', 'create_assignments',
+                       'get_writing','grade_writing','confirm_writing','undo_writing',
                        'create_member', 'update_member', 'transfer_member', 'import_members',
                        'search_students', 'get_student', 'update_student', 'get_assignment',
                        'save_answer_card_format', 'set_assignment_archive', 'append_assignment_student',
@@ -361,11 +382,11 @@ def create_app(config=None):
                        'grades', 'sheet', 'answer_card', 'upload_batch_photos',
                        'list_batch_photos', 'batch_photo_detail', 'batch_photo_image',
                        'match_batch_photos', 'exclude_photo', 'identify_batch_photo',
-                       'confirm_batch_photo', 'reassign_photo', 'get_image', 'page_preview',
+                       'confirm_batch_photo', 'reassign_photo', 'review_photo_identity', 'retry_photo_identity', 'identity_review_image', 'get_image', 'page_preview',
                        'assignment_attention', 'task_attention', 'save_review', 'undo_quick_review',
                        'suggestions', 'extract_answers', 'acknowledge_page', 'report', 'history',
                        'get_grading_job', 'latest_grading_job', 'start_grading_job', 'process_photo',
-                       'submission_job', 'start_submission_job', 'resume_grading_job', 'auto_grade', 'start_ai_review_job',
+                       'submission_job', 'start_submission_job', 'resume_grading_job', 'auto_grade', 'start_ai_review_job', 'start_identity_review_job',
                        'run_ocr', 'visual_reread', 'visual_reread_page', 'visual_suggestion_image',
                        'deletion_preview', 'delete_task',
                        'class_analysis_json', 'class_analysis_page', 'memories', 'candidates',
@@ -373,6 +394,7 @@ def create_app(config=None):
             if not app.config.get('PRODUCTION_MODE'):
                 enabled.update(('get_settings', 'update_settings', 'test_settings',
                                 'get_ai_review_settings', 'update_ai_review_settings', 'test_ai_review_settings'))
+            enabled.update(app.extensions.get('translation_endpoints', ()))
             if request.endpoint not in enabled:
                 fail('此功能的教师数据隔离尚未完成。', 403)
 
@@ -487,6 +509,7 @@ def create_app(config=None):
         result = [dict(q) for q in conn.execute('SELECT * FROM questions WHERE task_id=? ORDER BY number', (task_id,))]
         for q in result:
             q['variants'] = json.loads(q['variants'])
+            q['writing_config'] = json.loads(q.get('writing_config') or '{}')
         return result
 
     def page_dict(page, conn):
@@ -541,23 +564,44 @@ def create_app(config=None):
             review['teacher_edited'] = bool(review['teacher_edited'])
             review['graded'] = bool(review['auto_result']) or review['confirmed']
             review['uncertain'] = bool((review['auto_result'] or {}).get('uncertain')) and not review['confirmed']
+            if (q.get('paper_section') and not review['confirmed']
+                    and (review['auto_result'] or {}).get('source') != 'worksheet_section'):
+                review['uncertain'] = True
+            if (not review['confirmed'] and q['kind'] != 'grammar'
+                    and re.search(r'[\u4e00-\u9fff]', review['transcript'])):
+                review['uncertain'] = True
             review.update(compare(review['transcript'], review['answer'], review['variants']))
             review['score'] = review['score_override'] if review['score_override'] is not None else (review['points'] if review['matched'] and not review['confirmed_blank'] else 0)
             review['needs_review'] = not review['graded'] or review['uncertain']
+            if not review['confirmed'] and (review['uncertain'] or not review['graded']):
+                review['graded'] = False
+                review['score'] = None
+            if review.get('scoring_mode') == 'translation':
+                review['graded'] = review['confirmed'] and review['score_override'] is not None
+                review['score'] = review['score_override'] if review['graded'] else None
+                review['needs_review'] = not review['graded']
+                review['translation_revision'] = review.get('translation_revision', 0)
+            if q['kind'] in writing_grading.KINDS:
+                review['graded'] = review['confirmed'] and review['score_override'] is not None
+                review['score'] = review['score_override'] if review['graded'] else None
+                review['needs_review'] = not review['graded']
+                review['uncertain'] = not review['graded']
             reviews.append(review)
         result['reviews'] = reviews
-        result['score'] = round(sum(r['score'] for r in reviews), 2)
+        result['known_score'] = round(sum(r['score'] for r in reviews if r['score'] is not None), 2)
+        result['score'] = result['known_score'] if all(r['score'] is not None for r in reviews) else None
         result['total_points'] = round(sum(r['points'] for r in reviews), 2)
         result['confirmed_count'] = sum(r['confirmed'] for r in reviews)
         result['question_count'] = len(reviews)
         manual_final = all(r['confirmed'] for r in reviews) and not any(p['needs_review'] for p in result['pages'])
         result['is_final'] = (result['grading_state'] == 'final' or (result['grading_state'] == 'idle' and manual_final))
+        result['is_final'] = result['is_final'] and all(r['graded'] for r in reviews)
         result['status'] = 'confirmed' if result['is_final'] else 'pending'
-        result['machine_graded_count'] = sum(bool(r['auto_result']) for r in reviews)
+        result['machine_graded_count'] = sum(r['graded'] and bool(r['auto_result']) for r in reviews)
         result['teacher_reviewed_count'] = result['confirmed_count']
         result['uncertain_count'] = sum(r['uncertain'] for r in reviews)
         result['correct_count'] = sum(r['graded'] and r['score'] == r['points'] for r in reviews)
-        result['wrong_count'] = sum(r['graded'] and r['score'] < r['points'] for r in reviews)
+        result['wrong_count'] = sum(r['graded'] and r['score'] is not None and r['score'] < r['points'] for r in reviews)
         result['grading_source'] = ('机器批改／教师改判' if result['confirmed_count'] else '机器自动批改') if result['machine_graded_count'] else ('教师复核' if result['confirmed_count'] else '未批改')
         result['recognition'] = teacher_workbench.recognition_status(result)
         return result
@@ -673,8 +717,14 @@ def create_app(config=None):
         if not incoming or Path(incoming.filename or '').suffix.lower() != '.docx':
             fail('请选择可编辑的 Word（.docx）试题，旧版 .doc 请先另存为 .docx。')
         try:
-            parser = parse_answer_word if request.form.get('mode') == 'answers' else parse_word
-            result = parser(incoming.read(WORD_LIMIT+1), Path(incoming.filename).name)
+            raw=incoming.read(WORD_LIMIT+1)
+            filename=Path(incoming.filename).name
+            if request.form.get('mode') == 'ai':
+                from settings import read_ai_review
+                result=parse_task_word_ai(raw,filename,read_ai_review(db))
+            else:
+                parser = parse_answer_word if request.form.get('mode') == 'answers' else parse_task_word
+                result = parser(raw,filename)
         except ValueError as exc:
             fail(str(exc))
         return jsonify(result)
@@ -697,15 +747,36 @@ def create_app(config=None):
             if n in seen or n > 999:
                 fail('题号不能重复，且须在 1—999 之间。')
             seen.add(n)
-            if q.get('kind') not in ('word', 'phrase', 'sentence', 'grammar'):
-                fail('请选择单词、短语、句子或语法填空。')
+            if q.get('kind') not in ('word', 'phrase', 'sentence', 'grammar', *writing_grading.KINDS):
+                fail('请选择支持的题型。')
+            try:
+                writing_config=writing_grading.config(q.get('writing_config'),q['kind']) if q['kind'] in writing_grading.KINDS else {}
+            except (ValueError,TypeError) as exc:fail(str(exc))
+            q['writing_config']=writing_config
+            mode = q.get('scoring_mode', 'strict')
+            if mode not in ('strict', 'translation') or (mode == 'translation' and q['kind'] != 'sentence'):
+                fail('翻译评分仅支持明确创建的中译英句子题。')
+            if mode == 'translation' and not app.extensions.get('translation_enabled'):
+                fail('请先在隔离数据或备份后显式启用翻译数据库结构。', 409)
+            source = text(q.get('source_text', ''), '中文原文', 4000, required=mode == 'translation')
+            requirements = text(q.get('translation_requirements', ''), '翻译要求', 2000, required=False)
+            q.update(scoring_mode=mode, source_text=source, translation_requirements=requirements)
             variants = q.get('variants', [])
             if not isinstance(variants, list) or len(variants) > 20:
                 fail('每题最多设置 20 个可接受变体。')
-            validated.append((n, q['kind'], text(q.get('answer'), '标准答案'),
-                              dumps([text(v, '可接受变体') for v in variants]), number(q.get('points'), 0.01),
+            validated.append((n, q['kind'], text(q.get('answer',''), '标准答案',required=q['kind'] not in writing_grading.KINDS),
+                              dumps([text(v, '可接受变体') for v in variants]), number(1 if q.get('points') in (None,'') else q['points'], 0.01),
                               text(q.get('context', ''), '题目上下文', 10000, required=False),
-                              text(q.get('hint', ''), '提示词', 200, required=False)))
+                              text(q.get('hint', ''), '提示词', 200, required=False),
+                              text(q.get('paper_section', ''), '卷面分组', 40, required=False),
+                              text(str(q.get('paper_number', '')), '卷面原题号', 3, required=False)))
+            if validated[-1][-1] and not re.fullmatch(r'[1-9]\d{0,2}', validated[-1][-1]):
+                fail('卷面原题号须为 1—999。')
+            if bool(validated[-1][-2]) != bool(validated[-1][-1]):
+                fail('请同时填写卷面分组及原题号，或同时留空。')
+        mappings = [(q[-2].casefold(),q[-1]) for q in validated if q[-2]]
+        if len(mappings) != len(set(mappings)):
+            fail('同一分组内的原题号不能重复。')
         with db() as conn:
             if tenant_mode:
                 tid = conn.execute('INSERT INTO tasks(name,created_at,rules,passage,instructions,source_name,owner_id) VALUES(?,?,?,?,?,?,?)',
@@ -713,13 +784,61 @@ def create_app(config=None):
             else:
                 tid = conn.execute('INSERT INTO tasks(name,created_at,rules,passage,instructions,source_name) VALUES(?,?,?,?,?,?)',
                                    (name, now(), dumps(RULES), passage, instructions, source_name)).lastrowid
-            conn.executemany('INSERT INTO questions(task_id,number,kind,answer,variants,points,context,hint) VALUES(?,?,?,?,?,?,?,?)', [(tid, *q) for q in validated])
+            conn.executemany('INSERT INTO questions(task_id,number,kind,answer,variants,points,context,hint,paper_section,paper_number) VALUES(?,?,?,?,?,?,?,?,?,?)', [(tid, *q) for q in validated])
+            for item in items:
+                conn.execute('UPDATE questions SET writing_config=? WHERE task_id=? AND number=?',
+                             (dumps(item['writing_config']),tid,item['number']))
+            if app.extensions.get('translation_enabled'):
+                for item in items:
+                    conn.execute('UPDATE questions SET scoring_mode=?,source_text=?,translation_requirements=? WHERE task_id=? AND number=?',
+                        (item.get('scoring_mode', 'strict'), item.get('source_text', ''), item.get('translation_requirements', ''), tid, item['number']))
             result = task_detail(conn, tid)
+        if any(item.get('scoring_mode') == 'translation' for item in items):
+            runner = app.extensions['grading_jobs']
+            runner.enqueue(task_id=tid, options={'rubric_only': True})
+            runner.kick()
         return jsonify(result), 201
 
     @app.get('/api/tasks/<int:tid>')
     def get_task(tid):
         with db() as conn:
+            return jsonify(task_detail(conn, tid))
+
+    @app.post('/api/tasks/<int:tid>/paper-mapping')
+    def save_paper_mapping(tid):
+        payload = body()
+        items = payload.get('questions')
+        if not isinstance(items, list) or not 1 <= len(items) <= 200:
+            fail('请选择需要设置卷面对应关系的题目。')
+        with db() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            row(conn, 'tasks', tid)
+            if conn.execute('''SELECT 1 FROM assignments a JOIN classes c ON c.id=a.class_id
+                    WHERE a.task_id=? AND (a.archived=1 OR c.archived=1)''', (tid,)).fetchone():
+                fail('本任务有关联的归档班级或作业，不能修改卷面对应关系。', 409)
+            if conn.execute("SELECT 1 FROM grading_jobs WHERE state IN ('queued','running','interrupted') AND (task_id=? OR assignment_id IN (SELECT id FROM assignments WHERE task_id=?) OR submission_id IN (SELECT id FROM submissions WHERE task_id=?))", (tid,tid,tid)).fetchone():
+                fail('请等待相关后台任务结束后再修改。', 409)
+            seen = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    fail('卷面对应格式无效。')
+                qid = integer(item.get('question_id'), '题目编号')
+                q = row(conn, 'questions', qid)
+                if q['task_id'] != tid:
+                    fail('题目不属于当前任务。', 404)
+                if qid in seen:
+                    fail('题目不能重复。')
+                seen.add(qid)
+                section = text(item.get('paper_section', ''), '卷面分组', 40, required=False)
+                original = text(str(item.get('paper_number', '')), '卷面原题号', 3, required=False)
+                if bool(section) != bool(original) or (original and not re.fullmatch(r'[1-9]\d{0,2}', original)):
+                    fail('请同时填写卷面分组及原题号（1—999），或同时留空。')
+                context = text(item.get('context', q['context']), '题目上下文', 10000, required=False)
+                conn.execute('UPDATE questions SET paper_section=?,paper_number=?,context=? WHERE id=?',
+                             (section,original,context,qid))
+            mappings = [(q['paper_section'].casefold(),q['paper_number']) for q in questions(conn,tid) if q['paper_section']]
+            if len(mappings) != len(set(mappings)):
+                fail('同一分组内的原题号不能重复。')
             return jsonify(task_detail(conn, tid))
 
     @app.post('/api/tasks/<int:tid>/submissions')
@@ -899,6 +1018,9 @@ def create_app(config=None):
 
     def visual_suggestion_dto(record):
         result = json.loads(record['result'])
+        if result.get('error_code'):
+            from settings import visual_error_message
+            result['error_message'] = visual_error_message(result['error_code'])
         result.update(id=record['id'],
                       preview_url=f"/api/submissions/{record['submission_id']}/visual-suggestions/{record['id']}/image")
         return result
@@ -967,7 +1089,6 @@ def create_app(config=None):
             visual_review_config()
         except ValueError:
             return
-        remaining = 8
         for sid in submission_ids:
             with db() as conn:
                 if not conn.execute('SELECT 1 FROM submissions WHERE id=?', (sid,)).fetchone():
@@ -977,102 +1098,78 @@ def create_app(config=None):
                     'SELECT question_id,page_id FROM automatic_visual_attempts WHERE submission_id=?', (sid,))}
             candidates = sorted(detail['reviews'], key=lambda q: not (q['auto_result'] or {}).get('recognition_conflict'))
             for question in candidates:
+                if question['kind'] in writing_grading.KINDS:continue
                 qid = question['question_id']
                 crop = automatic_visual_crop(detail, question)
                 if (not crop or (qid, crop['page_id']) in attempted
                         or qid in detail.get('visual_suggestions', {})):
                     continue
-                remaining -= 1
                 teacher_auth.internal_post(app, f'/api/submissions/{sid}/reviews/{qid}/visual-reread',
                                            crop, owner_id=g.teacher_id if tenant_mode else None,
                                            environ={'moxieben.automatic_visual': True})
-                if remaining == 0:
-                    return
 
     app.extensions['prepare_visual_suggestions'] = prepare_visual_suggestions
 
-    def automatic_ai_review(sid, job_id, budget):
-        """Reuse the crop and version guards; keep model decisions separate from teacher edits."""
-        used = resolved = 0
-        skipped = {}
-        def skip(reason):
-            skipped[reason] = skipped.get(reason, 0) + 1
+    def apply_ai_review(conn, sid, question, result, suggestion_id, evidence=None):
+        qid = question['question_id']
+        evidence = (question['auto_result'] or {}) if evidence is None else evidence
+        before = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?',(sid,qid)).fetchone())
+        event_id = conn.execute('INSERT INTO review_events(submission_id,question_id,created_at,snapshot) VALUES(?,?,?,?)',
+                               (sid,qid,now(),'{}')).lastrowid
+        decision = dict(evidence, uncertain=False, transcript=result['transcript'],
+            ai_review=dict(model=result['model'],suggestion_id=suggestion_id,event_id=event_id,
+                           original=evidence,crop=result['crop'],scope=result.get('scope','question')))
+        conn.execute('UPDATE reviews SET transcript=?,auto_result=? WHERE submission_id=? AND question_id=?',
+                     (result['transcript'],dumps(decision),sid,qid))
+        after = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?',(sid,qid)).fetchone())
+        conn.execute('UPDATE review_events SET snapshot=? WHERE id=?',
+            (dumps(dict(action='automatic_ai_review',before=before,review_after=after,
+                        page_revision=review_page_revision(conn,sid),rules=RULES)),event_id))
+        conn.execute('UPDATE submissions SET updated_at=? WHERE id=?',(now(),sid))
+
+    def automatic_ai_review(sid, job_id):
+        """Review every eligible page in the background using the saved AI service."""
+        from settings import visual_error_message
         with db() as conn:
             detail = submission_detail(conn, sid)
-            page_revision = review_page_revision(conn, sid)
-            image_paths = {p['id']: uploads/row(conn,'pages',p['id'])['image'] for p in detail['pages']}
-            attempted = {(r['question_id'], r['page_id']) for r in conn.execute(
-                'SELECT question_id,page_id FROM automatic_visual_attempts WHERE submission_id=?', (sid,))}
-        localization = None
-        localization_unavailable = False
-        if any(q['uncertain'] and not q['teacher_edited'] and not automatic_visual_crop(detail,q) for q in detail['reviews']):
-            from ai_localization import offline_blocks, localized_detail
-            try:
-                blocks = offline_blocks(detail, image_paths)
-                localization = dict(blocks=blocks, page_revision=page_revision,
-                                    signatures={q['question_id']: dumps(q) for q in detail['reviews']})
-                detail = localized_detail(detail, blocks)
-            except (ImportError, ValueError, OSError, RuntimeError):
-                # Optional cached models may be absent on a container; never fall back to a paid OCR call.
-                app.logger.warning('Offline review localization unavailable for submission %s',sid)
-                localization_unavailable = True
-        page_fallback = False
-        metrics = dict(requests=0, valid=0, suggestions=0)
-        for question in detail['reviews']:
-            if not question['uncertain']:
+        used = resolved = 0
+        skipped = {}
+        metrics = dict(requests=0, valid=0, suggestions=0, reused_suggestions=0, pending=0)
+        for page in detail['pages']:
+            if page['status'] != 'done':
                 continue
-            reasons = []
-            crop = automatic_visual_crop(detail, question, reasons)
-            if not crop:
-                page_fallback = True
+            response = teacher_auth.internal_post(app, f'/api/submissions/{sid}/visual-reread-page',
+                {'page_id':page['id']}, owner_id=g.teacher_id if tenant_mode else None,
+                environ={'moxieben.ai_review_job':job_id})
+            result = response.json or {}
+            used += result.get('considered',0)
+            resolved += result.get('resolved',0)
+            for key in metrics:
+                metrics[key] += result.get(key,0)
+            if result.get('error_code'):
+                reason='整页接口失败：'+visual_error_message(result['error_code'])
+                skipped[reason] = skipped.get(reason,0)+result.get('considered',0)
+                metrics['failed_pages'] = metrics.get('failed_pages',0)+1
+                if result['error_code'] not in ('output_truncated','response_format','empty_response','image_too_large'):
+                    metrics['stopped'] = 1
+                    break
                 continue
-            if (question['question_id'], crop['page_id']) in attempted:
-                skip('本题已尝试自动复核')
-                page_fallback = True
+            if response.status_code != 200:
+                skipped['答卷状态变化或不符合复核条件'] = 1
                 continue
-            if used >= budget:
-                skip('达到本次调用上限')
-                continue
-            response = teacher_auth.internal_post(app,
-                f"/api/submissions/{sid}/reviews/{question['question_id']}/visual-reread", crop,
-                owner_id=g.teacher_id if tenant_mode else None,
-                environ={'moxieben.automatic_visual': True, 'moxieben.ai_review_job': job_id,
-                         'moxieben.ai_localization': localization})
-            used += 1
-            metrics['requests'] += 1
-            metrics['valid'] += int(response.status_code == 200)
-            metrics['suggestions'] += int(response.status_code == 200 and response.json.get('status') == 'readable')
-            if response.status_code == 200 and response.json.get('applied'):
-                resolved += 1
-            else:
-                skip('接口失败：' + response.json.get('error_code','provider') if response.status_code == 502 else
-                     '两次识别未能相互印证' if response.status_code == 200 else '答卷状态变化或不符合复核条件')
-        if page_fallback and used < budget:
-            for page in detail['pages']:
-                if page['status'] != 'done' or used >= budget:
-                    continue
-                response = teacher_auth.internal_post(app, f'/api/submissions/{sid}/visual-reread-page',
-                    {'page_id':page['id']}, owner_id=g.teacher_id if tenant_mode else None,
-                    environ={'moxieben.ai_review_job':job_id,'moxieben.ai_budget':budget-used})
-                result = response.json or {}
-                used += result.get('considered', 0)
-                for key in metrics:
-                    metrics[key] += result.get(key, 0)
-                if result.get('error_code'):
-                    skip('整页接口失败：' + result['error_code'])
-                elif result.get('suggestions'):
-                    skipped['整页复读建议待教师采纳'] = skipped.get('整页复读建议待教师采纳',0) + result['suggestions']
-                elif result.get('requests'):
-                    skip('整页结果仍需人工核对')
-                elif result.get('reason'):
-                    skip(result['reason'])
+            pending = result.get('suggestions',0) - result.get('resolved',0)
+            if pending:
+                skipped['模型与 OCR 不一致或缺少独立证据，建议已保存'] = skipped.get('模型与 OCR 不一致或缺少独立证据，建议已保存',0)+pending
+            unclear = result.get('considered',0)-result.get('suggestions',0)
+            if unclear:
+                skipped['笔迹或题号仍无法确认'] = skipped.get('笔迹或题号仍无法确认',0)+unclear
         return used, resolved, skipped, metrics
 
     app.extensions['automatic_ai_review'] = automatic_ai_review
 
     @app.post('/api/submissions/<int:sid>/visual-reread-page')
     def visual_reread_page(sid):
-        from settings import reread_page, VisualReviewError
+        from settings import reread_page, visual_error_code, visual_error_message
         payload = body()
         if set(payload) != {'page_id'}:
             fail('整页复读只接受照片编号。')
@@ -1112,7 +1209,9 @@ def create_app(config=None):
             if not q['uncertain'] or q['teacher_edited'] or q['confirmed'] or q['kind'] not in ('word','phrase','grammar'):
                 continue
             previous = detail.get('visual_suggestions', {}).get(q['question_id'])
-            if previous and (automatic or previous['status'] == 'readable'):
+            if previous and not previous.get('error_code') and (
+                    not automatic and previous['status'] == 'readable'
+                    or automatic and (previous['status'] != 'readable' or previous.get('scope') != 'page')):
                 continue
             regions = (q['auto_result'] or {}).get('regions') or q['regions']
             owners = {r['page_id'] for r in regions}
@@ -1123,13 +1222,16 @@ def create_app(config=None):
             if owners != {pid}:
                 continue
             candidates.append(q)
-        limit = request.environ.get('moxieben.ai_budget', config['limit'])
-        candidates = candidates[:limit]
         if not candidates:
-            return jsonify(requests=0, valid=0, suggestions=0, considered=0, reason='没有可唯一对应本页的新异常题')
-        numbers = [q['number'] for q in candidates]
-        if len(set(numbers)) != len(numbers):
+            return jsonify(requests=0, valid=0, suggestions=0, reused_suggestions=0, pending=0, considered=0,
+                           reason='本页没有可补读的新题；已有建议可直接确认，其他题请核对原图或框选作答。')
+        if len({q['number'] for q in candidates}) != len(candidates):
             fail('题号重复，需人工定位。', 409)
+        cached = {q['number']:detail['visual_suggestions'][q['question_id']] for q in candidates
+                  if automatic and q['question_id'] in detail.get('visual_suggestions', {})
+                  and detail['visual_suggestions'][q['question_id']]['status'] == 'readable'
+                  and not detail['visual_suggestions'][q['question_id']].get('error_code')}
+        numbers = [q['number'] for q in candidates if q['number'] not in cached]
         if not visual_reread_lock.acquire(blocking=False):
             fail('已有视觉复读正在进行，请稍后重试。', 409)
         try:
@@ -1144,16 +1246,18 @@ def create_app(config=None):
             started = time.monotonic()
             error_code = None
             try:
-                items = reread_page(config, png, numbers)
+                items = reread_page(config, png, numbers) if numbers else []
             except (ValueError, OSError) as exc:
-                error_code = str(exc) if isinstance(exc, VisualReviewError) else 'provider'
+                error_code = visual_error_code(exc)
                 items = []
-            mapped = {item['number']: item for item in items}
+            mapped = cached | {item['number']: item for item in items}
             with db() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 latest, _ = current(conn)
                 latest_q = {q['question_id']:q for q in latest['reviews']}
-                saved = 0
+                saved = reused = resolved = 0
+                records = []
+                decisions = []
                 for q in candidates:
                     current_q = latest_q[q['question_id']]
                     if visual_revision(detail,q,revisions) != visual_revision(latest,current_q,review_page_revision(conn,sid)):
@@ -1165,12 +1269,44 @@ def create_app(config=None):
                         suggested_score=score, max_score=q['points'], trigger='automatic' if automatic else 'manual',
                         model=config['model'], elapsed_ms=round((time.monotonic()-started)*1000), error_code=error_code,
                         crop=dict(page_id=pid,box=[0,0,page['width'],page['height']],rotation=page['display_rotation']))
-                    conn.execute('INSERT INTO visual_suggestions(submission_id,question_id,page_id,revision,created_at,result) VALUES(?,?,?,?,?,?)',
-                        (sid,q['question_id'],pid,visual_revision(latest,current_q,review_page_revision(conn,sid)),now(),dumps(result)))
+                    if q['number'] in cached:
+                        result = dict(item, trigger='automatic')
+                        vid = item['id']
+                    else:
+                        vid = conn.execute('INSERT INTO visual_suggestions(submission_id,question_id,page_id,revision,created_at,result) VALUES(?,?,?,?,?,?)',
+                            (sid,q['question_id'],pid,visual_revision(latest,current_q,review_page_revision(conn,sid)),now(),dumps(result))).lastrowid
+                    records.append((vid,q['question_id']))
                     saved += int(readable)
-            response = dict(requests=1, valid=int(error_code is None), suggestions=saved, considered=len(candidates), error_code=error_code)
+                    reused += int(readable and q['number'] in cached)
+                    evidence = current_q['auto_result'] or {}
+                    unique_number = sum(number_occurrences(p).count(q['number']) for p in latest['pages']) == 1
+                    corroborated = (readable and unique_number
+                        and evidence.get('source') in ('region_supplementary_ocr','localization_ocr')
+                        and bool(evidence.get('transcript'))
+                        and normalize(evidence['transcript']) == normalize(item['transcript'])
+                        and bool(evidence.get('regions'))
+                        and all(r['page_id']==pid for r in evidence['regions']))
+                    if automatic and corroborated:
+                        decisions.append((current_q,result,vid))
+                for question, result, vid in decisions:
+                    apply_ai_review(conn,sid,question,result,vid)
+                    resolved += 1
+                if decisions:
+                    # All suggestions came from the same unchanged snapshot; our audit events must not invalidate siblings.
+                    fresh = submission_detail(conn,sid)
+                    fresh_q = {q['question_id']:q for q in fresh['reviews']}
+                    for vid,qid in records:
+                        conn.execute('UPDATE visual_suggestions SET revision=? WHERE id=?',
+                            (visual_revision(fresh,fresh_q[qid],review_page_revision(conn,sid)),vid))
+                remaining = fresh if decisions else latest
+                candidate_ids = {q['question_id'] for q in candidates}
+                pending = sum(q['question_id'] in candidate_ids and q['uncertain'] and not q['confirmed']
+                              and not q['teacher_edited'] for q in remaining['reviews'])
+            response = dict(requests=int(bool(numbers)), valid=int(bool(numbers) and error_code is None),
+                            suggestions=saved, reused_suggestions=reused, pending=pending,
+                            resolved=resolved, considered=len(candidates), error_code=error_code)
             if error_code:
-                response['error'] = '整页复读失败（' + error_code + '），原记录保留，可检查设置后主动重试。'
+                response['error'] = visual_error_message(error_code) + '；原记录保留，请检查设置后主动重试。'
             return jsonify(response), 502 if error_code else 200
         finally:
             visual_reread_lock.release()
@@ -1317,19 +1453,7 @@ def create_app(config=None):
                     (submission_id,question_id,page_id,revision,created_at,result) VALUES (?,?,?,?,?,?)''',
                     (sid,qid,pid,revision,now(),dumps(saved))).lastrowid
                 if ai_job and saved['can_adopt']:
-                    before = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?', (sid,qid)).fetchone())
-                    event_id = conn.execute('INSERT INTO review_events(submission_id,question_id,created_at,snapshot) VALUES(?,?,?,?)',
-                                            (sid,qid,now(),'{}')).lastrowid
-                    decision = dict(evidence, uncertain=False, transcript=result['transcript'],
-                                    ai_review=dict(model=config['model'], suggestion_id=vid, event_id=event_id,
-                                                   original=evidence, crop=saved['crop']))
-                    conn.execute('UPDATE reviews SET transcript=?,auto_result=? WHERE submission_id=? AND question_id=?',
-                                 (result['transcript'],dumps(decision),sid,qid))
-                    after = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?', (sid,qid)).fetchone())
-                    conn.execute('UPDATE review_events SET snapshot=? WHERE id=?',
-                        (dumps(dict(action='automatic_ai_review', before=before, review_after=after,
-                                    page_revision=review_page_revision(conn,sid), rules=RULES)),event_id))
-                    conn.execute('UPDATE submissions SET updated_at=? WHERE id=?', (now(),sid))
+                    apply_ai_review(conn,sid,question,saved,vid,evidence)
                     return jsonify(applied=True)
                 return jsonify(visual_suggestion_dto(row(conn, 'visual_suggestions', vid)))
         finally:
@@ -1365,6 +1489,10 @@ def create_app(config=None):
             q = conn.execute('SELECT * FROM questions WHERE id=? AND task_id=?', (qid, submission['task_id'])).fetchone()
             if q is None:
                 fail('这道题不属于当前任务。', 404)
+            if dict(q).get('scoring_mode') == 'translation':
+                fail('翻译题请使用翻译评分面板保存转录和教师评分。', 409)
+            if q['kind'] in writing_grading.KINDS:
+                fail('写作题请使用写作面板保存转录和教师评分。',409)
             old = dict(conn.execute('SELECT * FROM reviews WHERE submission_id=? AND question_id=?', (sid, qid)).fetchone())
             if visual_id:
                 detail = submission_detail(conn, sid)
@@ -1489,6 +1617,10 @@ def create_app(config=None):
                         continue
                     if review['kind'] == 'grammar' and re.search(r'[_＿]{3,}', review.get('context','')):
                         continue
+                    if review.get('paper_section') or review.get('paper_number'):
+                        continue
+                    if review['kind'] != 'grammar' and re.search(r'[\u4e00-\u9fff]', match[2]):
+                        continue
                     # ponytail: grammar suggestions require a short standalone answer;
                     # inline article blanks need teacher mapping, not guessed extraction.
                     if review['kind'] == 'grammar' and (
@@ -1518,6 +1650,7 @@ def create_app(config=None):
         all_numbers = [n for p in detail['pages'] if p['status'] not in ('error', 'running') for n in number_occurrences(p)]
         result = [item for item in result if sum(i['question_id'] == item['question_id'] for i in result) == 1
                   and all_numbers.count(next(r['number'] for r in detail['reviews'] if r['question_id'] == item['question_id'])) <= 1]
+        result.extend(worksheet_candidates(untouched, detail['pages']))
         return sorted(result, key=lambda item: next(r['number'] for r in detail['reviews'] if r['question_id'] == item['question_id']))
 
     @app.post('/api/submissions/<int:sid>/extract-answers')
@@ -1637,7 +1770,17 @@ def create_app(config=None):
     teacher_workbench.register(app, db, row, submission_detail, uploads, submission_summaries)
     class_analysis.register(app, db, row, submission_summaries)
     grading_jobs.register(app, db, row, now)
+    import translation_review
+    if app.testing or translation_new_database:
+        translation_review.migrate(database)
+    with db() as conn:
+        translation_enabled = 'scoring_mode' in {c['name'] for c in conn.execute('PRAGMA table_info(questions)')}
+    app.extensions['translation_enabled'] = translation_enabled
+    if translation_enabled:
+        translation_review.register(app, db, row, now, submission_detail)
     task_deletion.register(app, db, row, database.resolve(), uploads)
+    import writing_review
+    writing_review.register(app,db,row,submission_detail,now)
     return app
 
 

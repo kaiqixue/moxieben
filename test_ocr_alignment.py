@@ -268,7 +268,7 @@ class OCRAlignmentTests(unittest.TestCase):
             cloud.assert_not_called()
         self.assertEqual(result['reviews'][0]['transcript'],'(why)')
         self.assertTrue(result['reviews'][0]['uncertain'])
-        self.assertEqual(result['reviews'][0]['score'],0)
+        self.assertIsNone(result['reviews'][0]['score'])
 
     def test_printed_hint_comes_from_context_even_when_hint_field_is_empty(self):
         from answer_extraction import grammar_candidates
@@ -296,7 +296,7 @@ class OCRAlignmentTests(unittest.TestCase):
             result = self.post(f'/api/submissions/{sid}/auto-grade',{'reextract':True}).json
             cloud.assert_not_called()
         self.assertEqual(result['reviews'][0]['transcript'],'what')
-        self.assertEqual(result['reviews'][0]['score'],0)
+        self.assertIsNone(result['reviews'][0]['score'])
         self.assertTrue(result['reviews'][0]['uncertain'])
         self.assertIn('不同',result['reviews'][0]['auto_result']['reason'])
 
@@ -319,7 +319,7 @@ class OCRAlignmentTests(unittest.TestCase):
             cloud.assert_not_called()
         q = result['reviews'][1]
         self.assertEqual(q['transcript'],'demand')
-        self.assertEqual(q['score'],0, 'Keep literal OCR; do not complete it to the answer to demand')
+        self.assertIsNone(q['score'], 'Conflicting literal OCR must wait for verification')
         self.assertTrue(q['uncertain'])
         self.assertTrue(q['auto_result']['recognition_conflict'])
         evidence=q['auto_result']['recognition_evidence']

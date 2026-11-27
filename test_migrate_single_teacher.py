@@ -60,7 +60,7 @@ class SingleTeacherMigrationTests(unittest.TestCase):
             response = browser.get(f'/api/batch-photos/{photo}/image')
             self.assertEqual(response.status_code, 200)
             response.close()
-            with patch.dict(os.environ, {'MOXIEBEN_TENANT_DIR': str(target)}):
+            with patch('app.ROOT',Path(root)), patch.dict(os.environ, {'MOXIEBEN_TENANT_DIR': str(target)}):
                 selected = create_app()
             self.assertTrue(selected.config['TEACHER_TENANT_MODE'])
             self.assertEqual(Path(selected.config['DATA_DIR']), target)

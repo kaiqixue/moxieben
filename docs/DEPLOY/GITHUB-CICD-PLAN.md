@@ -72,7 +72,7 @@ CI 完整测试运行在非 root、只读文件系统、只读源码挂载的临
 | `ACR_REGISTRY` | 实际 ACR 登录域名，无 scheme、无仓库路径。 |
 | `ACR_REPOSITORY` | 实际 `命名空间/镜像名`，例如 `bansui/bansui`。 |
 | `STAGING_AUTO_DEPLOY` | 首次先留空；演练及人工批准后才设为 `true`。 |
-| `STAGING_SSH_HOST` | `101.132.236.178`，配置前确认仍为目标 Staging。 |
+| `STAGING_SSH_HOST` | 你的 Staging 服务器地址，例如 `staging.example.invalid`，配置前确认目标。 |
 | `STAGING_SSH_USER` | 新建专用受限用户，例如 `moxieben-deploy`，不使用 admin。 |
 | `STAGING_SSH_PORT` | 实际 SSH 端口，默认 22。 |
 | `STAGING_SSH_KNOWN_HOSTS` | 经管理员核对的完整 known_hosts 条目；非默认端口使用对应 `[host]:port` 格式。不能用未核验 ssh-keyscan 替代指纹核对。 |

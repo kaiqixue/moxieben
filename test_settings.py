@@ -9,6 +9,31 @@ from pathlib import Path
 
 
 class SettingsTests(TestCase):
+    def test_deepseek_image_transcription_disables_thinking_only_on_official_endpoint(self):
+        import settings
+        response=__import__('unittest').mock.MagicMock()
+        response.__enter__.return_value=response
+        response.read.return_value=json.dumps({'choices':[{'message':{'content':'[]'},'finish_reason':'stop'}]}).encode()
+        for url,raw,expected in [('https://api.deepseek.com/v1',b'png',True),('https://other.example.test/v1',b'png',False),('https://api.deepseek.com',None,False)]:
+            with patch('settings._open',return_value=response) as network:
+                settings._chat(dict(base_url=url,model='deepseek-flash',api_key='secret'),raw,'test',2048)
+            sent=json.loads(network.call_args.args[0].data)
+            self.assertEqual(sent.get('thinking'),{'type':'disabled'} if expected else None)
+
+    def test_visual_provider_errors_keep_safe_failure_categories(self):
+        import settings
+        cases = [('接口返回 HTTP 400：private-key', 'request_rejected'),
+                 ('接口返回 HTTP 404：private-key', 'endpoint_or_model'),
+                 ('接口返回 HTTP 413：private-key', 'image_too_large'),
+                 ('接口返回 HTTP 500：private-key', 'service_unavailable'),
+                 ('识别内容被接口截断，请拆分照片后重试。', 'output_truncated'),
+                 ('接口没有返回识别文字，请确认模型支持图片。', 'empty_response'),
+                 ('请先填写并保存 API 地址、模型名和 API Key。', 'configuration')]
+        for message, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(settings.visual_error_code(ValueError(message)),expected)
+                self.assertNotIn('private-key',settings.visual_error_message(expected))
+
     def setUp(self):
         import tempfile
         self.tmp=tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
